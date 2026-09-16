@@ -128,6 +128,47 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     return _optimize_generic(mod)
 
 
+def _uniquify_tpu_local_names(function):
+    """Give hygienic macro allocations distinct names for the LMEM attr ABI.
+
+    TIR identity remains authoritative: two DeclBuffers sharing one data Var
+    are still rejected by AddressAssign. Only different Vars with colliding
+    hints are renamed, including their Allocate definitions and all uses.
+    """
+    variables = []
+
+    def collect(node):
+        if isinstance(node, tir.Allocate):
+            variables.append(node.buffer_var)
+
+    tir.stmt_functor.post_order_visit(function.body, collect)
+    reserved = {v.name for v in variables}
+    seen = set()
+    mapping = {}
+    for var in variables:
+        if var.name in seen:
+            suffix = 1
+            name = f"{var.name}_macro{suffix}"
+            while name in reserved:
+                suffix += 1
+                name = f"{var.name}_macro{suffix}"
+            reserved.add(name)
+            mapping[var] = tir.Var(name, var.type_annotation, var.span)
+        seen.add(var.name)
+    if not mapping:
+        return function
+    body = tir.stmt_functor.substitute(function.body, mapping)
+
+    def rename_definition(node):
+        if isinstance(node, tir.Allocate) and node.buffer_var in mapping:
+            return tir.Allocate(mapping[node.buffer_var], node.dtype, node.extents, node.condition,
+                                node.body, node.annotations, node.span)
+        return None
+
+    body = tir.stmt_functor.ir_transform(body, None, rename_definition, ["tir.Allocate"])
+    return function.with_body(body)
+
+
 def AssignTPUAddresses(mod: IRModule, target: Target) -> IRModule:
     """Assign TPUv7 LMEM addresses after the final TPU contract check.
 
@@ -153,4 +194,10 @@ def AssignTPUAddresses(mod: IRModule, target: Target) -> IRModule:
             raise ValueError("AssignTPUAddresses target identity mismatch for PrimFunc "
                              f"{global_var.name_hint!r}: function={function_selection}, "
                              f"requested={selected_target}")
+    mod = IRModule(
+        {
+            gv: _uniquify_tpu_local_names(f) if isinstance(f, tir.PrimFunc) else f
+            for gv, f in mod.functions.items()
+        },
+        attrs=mod.attrs)
     return tilelang.transform.AddressAssign()(mod)

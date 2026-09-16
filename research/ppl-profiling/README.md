@@ -200,17 +200,12 @@ decoded reports, and failure diagnostics remain under `research/artifacts/`.
 | `instruction_timings` | Device engine, core, ID, opcode, and time interval |
 | `parser_status` | `ready`, `unavailable`, `no-raw-trace`, or `invalid-report` |
 
-## Evidence and limits
+## Limits
 
-The reference evidence is tied to commit
-`e5774525e3a6e11d0d6010e979203c55181a8872` under the ignored directory
-`research/artifacts/2026-09-09/final-e5774525/`.
-
-- BM1690 and SG2260E CModel profiling produced raw command records. No
-  compatible CModel decoder was available, so these reports contain no device
-  duration.
-- SG2260E PCIe profiling covered the core, FP8, and demo matrices. The reports
-  contain 3,568 valid nanosecond intervals decoded by `bigTpuProfile 0.3.5`.
+- CModel profiling can produce raw command records even when no compatible
+  decoder is installed; such reports intentionally contain no device duration.
+- SG2260E PCIe reports may include decoded nanosecond intervals when a
+  compatible `bigTpuProfile` environment is configured.
 - Each profile uses one recorded launch. It is suitable for checking
   instruction mapping and finding slow commands, not for latency or throughput
   benchmarks.

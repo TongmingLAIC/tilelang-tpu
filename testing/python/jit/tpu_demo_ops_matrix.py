@@ -32,7 +32,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tpu_demo.cases import (DTYPES, OPERATIONS, TARGET_CONFIGS, DemoCase, build_cases)
+from tpu_demo.cases import (DTYPES, OPERATIONS, TARGET_CONFIGS, DemoCase, build_cases,
+                            kernel_variant)
 
 if __package__:
     from .tpu_matrix_common import (
@@ -949,9 +950,17 @@ def validate_numeric_identity(payload: Mapping[str, Any], *, chip: str, programm
     if metrics.get("finite") is not True:
         raise RuntimeError("demo worker result lacks metrics.finite=true")
     parameters = payload.get("parameters")
+    expected_kernel = kernel_variant(case.operation, case.dtype, programming_model)
+    if (not isinstance(parameters, dict) or parameters.get("kernel_variant") != expected_kernel):
+        observed = None if not isinstance(parameters, dict) else parameters.get("kernel_variant")
+        raise RuntimeError("demo worker result kernel variant mismatch: "
+                           f"expected {expected_kernel!r}, got {observed!r}")
     if case.variant != "default" and (not isinstance(parameters, dict) or
                                       parameters.get("variant") != case.variant):
         raise RuntimeError("demo worker result does not identify the scheduled variant")
+    if case.operation == "flashattn" and (not isinstance(parameters, dict) or
+                                          parameters.get("is_causal") is not case.is_causal):
+        raise RuntimeError("demo worker result does not identify the scheduled causal mode")
 
 
 def selected_configurations(args: argparse.Namespace) -> tuple[tuple[str, str], ...]:

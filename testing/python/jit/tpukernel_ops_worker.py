@@ -133,6 +133,11 @@ def build_case_specs() -> Tuple[CaseSpec, ...]:
         add("gemm", dtype, "overwrite", accumulate=False, transpose_b=False)
         add("gemm", dtype, "accumulate", accumulate=True, transpose_b=False)
         add("gemm", dtype, "transpose-b", accumulate=False, transpose_b=True)
+    # BM1690 and SG2260E both expose the native FP32 matrix path.  Keep its
+    # storage contract distinct because these operands use local.matrix rather
+    # than the lane-distributed local layout used by lower-precision GEMM.
+    add("gemm", "float32", "overwrite", accumulate=False, transpose_b=False)
+    add("gemm", "float32", "accumulate", accumulate=True, transpose_b=False)
 
     for operation in ("add", "sub", "mul", "div", "max"):
         for dtype in _FLOAT_DTYPES:
@@ -150,7 +155,6 @@ def build_case_specs() -> Tuple[CaseSpec, ...]:
 
     for dtype in _FLOAT_DTYPES:
         add("exp", dtype)
-        add("sigmoid", dtype)
 
     for operation in ("reduce-sum", "reduce-max"):
         for dtype in _FLOAT_DTYPES:
@@ -161,12 +165,10 @@ def build_case_specs() -> Tuple[CaseSpec, ...]:
         add("rsqrt", dtype)
 
     for dtype in _FLOAT_DTYPES:
-        add("rope", dtype)
         add("gather", dtype)
 
-    # SG2260E's PPL 1.7 tpub_7_1_e runtime explicitly rejects the HAU sort
-    # primitive.  Keep these probes in the shared registry, but schedule them
-    # only for BM1690; a source-only compiler test verifies the SG rejection.
+    # The SG2260E PPL 1.7 CModel terminates inside this HAU primitive.  Keep
+    # the probes in the shared registry but schedule them only for BM1690.
     add("topk", "float32", "descending", supported_chips=("bm1690",), descended=True)
     add("topk", "float32", "ascending", supported_chips=("bm1690",), descended=False)
     add("topk", "int32", "descending", supported_chips=("bm1690",), descended=True)
@@ -373,7 +375,7 @@ def _tolerance(dtype: str, operation: str) -> Tuple[float, float]:
             "float16": (1.0e-2, 1.0e-2),
             "bfloat16": (6.0e-2, 6.0e-2),
         }[dtype]
-    if operation in ("exp", "sigmoid"):
+    if operation == "exp":
         return {
             "float32": (1.0e-2, 1.0e-2),
             "float16": (2.0e-2, 2.0e-2),
@@ -566,19 +568,25 @@ def _run_gemm(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: An
     transpose_b = bool(spec.parameters["transpose_b"])
     b_shape = (n, k) if transpose_b else (k, n)
     c_dtype = "float32" if accumulate else dtype
+    local_scope = "local.matrix" if dtype == "float32" else "shared"
     initial = 0.5
 
     @T.prim_func
     def kernel(a: T.Tensor((m, k), dtype), b: T.Tensor(b_shape, dtype), c: T.Tensor((m, n),
                                                                                     c_dtype)):
         with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
-            a_local = T.alloc_shared((m, k), dtype)
-            b_local = T.alloc_shared(b_shape, dtype)
-            c_local = T.alloc_shared((m, n), c_dtype)
+            a_local = T.alloc_shared((m, k), dtype, scope=local_scope)
+            b_local = T.alloc_shared(b_shape, dtype, scope=local_scope)
+            c_local = T.alloc_shared((m, n), c_dtype, scope=local_scope)
             T.ppl_copy(a, a_local)
             T.ppl_copy(b, b_local)
             if accumulate:
-                T.ppl_fill(c_local, T.float32(initial))
+                # local.matrix is intentionally reserved for FP32 matrix
+                # operands, so seed accumulation through its global tensor.
+                if dtype == "float32":
+                    T.ppl_copy(c, c_local)
+                else:
+                    T.ppl_fill(c_local, T.float32(initial))
             T.ppl_gemm(
                 a_local,
                 b_local,
@@ -590,14 +598,18 @@ def _run_gemm(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: An
 
     a = _random_float(torch, (m, k), dtype, generator)
     b = _random_float(torch, b_shape, dtype, generator)
-    c = torch.zeros((m, n), dtype=_torch_dtype(torch, c_dtype))
+    c = torch.full((m, n),
+                   initial if accumulate and dtype == "float32" else 0.0,
+                   dtype=_torch_dtype(torch, c_dtype))
     timing = _compile_and_launch(tilelang, kernel, (a, b, c), chip, runtime_mode)
     b_ref = b.float().transpose(0, 1) if transpose_b else b.float()
     expected_f32 = torch.matmul(a.float(), b_ref)
     if accumulate:
         expected_f32 = expected_f32 + initial
     expected = expected_f32.to(_torch_dtype(torch, c_dtype))
-    if dtype == "bfloat16":
+    if dtype == "float32":
+        atol, rtol = (2.0e-5, 2.0e-5)
+    elif dtype == "bfloat16":
         atol, rtol = (1.5e-1, 3.0e-2)
     else:
         atol, rtol = (3.0e-2, 2.0e-2)
@@ -629,35 +641,6 @@ def _run_exp(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any
     timing = _compile_and_launch(tilelang, kernel, (src, dst), chip, runtime_mode)
     expected = torch.exp(src.float()).to(_torch_dtype(torch, dtype))
     atol, rtol = _tolerance(dtype, "exp")
-    return _comparison(dst, expected, atol=atol, rtol=rtol), timing
-
-
-def _run_sigmoid(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
-                 generator: Any) -> Tuple[Dict[str, Any], Dict[str, float]]:
-    shape = (4, 32)
-    dtype = spec.dtype
-
-    @T.prim_func
-    def kernel(src: T.Tensor(shape, dtype), dst: T.Tensor(shape, dtype)):
-        with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
-            src_local = T.alloc_shared(shape, dtype)
-            dst_local = T.alloc_shared(shape, dtype)
-            work0 = T.alloc_shared(shape, dtype)
-            work1 = T.alloc_shared(shape, dtype)
-            coeff = T.alloc_shared((64, 32), dtype)
-            T.ppl_copy(src, src_local)
-            T.ppl_sigmoid(dst_local, src_local, work0, work1, coeff)
-            T.ppl_copy(dst_local, dst)
-
-    src = torch.clamp(
-        _random_float(torch, shape, dtype, generator).float(),
-        -8.0,
-        8.0,
-    ).to(_torch_dtype(torch, dtype))
-    dst = torch.zeros_like(src)
-    timing = _compile_and_launch(tilelang, kernel, (src, dst), chip, runtime_mode)
-    expected = torch.sigmoid(src.float()).to(_torch_dtype(torch, dtype))
-    atol, rtol = _tolerance(dtype, "sigmoid")
     return _comparison(dst, expected, atol=atol, rtol=rtol), timing
 
 
@@ -717,40 +700,6 @@ def _run_rsqrt(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: A
     timing = _compile_and_launch(tilelang, kernel, (src, dst), chip, runtime_mode)
     expected = torch.rsqrt(src.float()).to(_torch_dtype(torch, dtype))
     atol, rtol = _tolerance(dtype, "rsqrt")
-    return _comparison(dst, expected, atol=atol, rtol=rtol), timing
-
-
-def _run_rope(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
-              generator: Any) -> Tuple[Dict[str, Any], Dict[str, float]]:
-    shape = (4, 32)
-    dtype = spec.dtype
-
-    @T.prim_func
-    def kernel(even0: T.Tensor(shape, dtype), even1: T.Tensor(shape, dtype),
-               odd0: T.Tensor(shape, dtype), odd1: T.Tensor(shape,
-                                                            dtype), dst: T.Tensor(shape, dtype)):
-        with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
-            even0_local = T.alloc_shared(shape, dtype)
-            even1_local = T.alloc_shared(shape, dtype)
-            odd0_local = T.alloc_shared(shape, dtype)
-            odd1_local = T.alloc_shared(shape, dtype)
-            dst_local = T.alloc_shared(shape, dtype)
-            T.ppl_copy(even0, even0_local)
-            T.ppl_copy(even1, even1_local)
-            T.ppl_copy(odd0, odd0_local)
-            T.ppl_copy(odd1, odd1_local)
-            T.ppl_rope_add(dst_local, even0_local, even1_local, odd0_local, odd1_local)
-            T.ppl_copy(dst_local, dst)
-
-    inputs = tuple(_random_float(torch, shape, dtype, generator) for _ in range(4))
-    dst = torch.zeros(shape, dtype=_torch_dtype(torch, dtype))
-    timing = _compile_and_launch(tilelang, kernel, (*inputs, dst), chip, runtime_mode)
-    even0, even1, odd0, odd1 = inputs
-    expected_f32 = torch.empty(shape, dtype=torch.float32)
-    expected_f32[:, 0::2] = even0.float()[:, 0::2] + even1.float()[:, 1::2]
-    expected_f32[:, 1::2] = odd0.float()[:, 1::2] + odd1.float()[:, 0::2]
-    expected = expected_f32.to(_torch_dtype(torch, dtype))
-    atol, rtol = _tolerance(dtype, "rope")
     return _comparison(dst, expected, atol=atol, rtol=rtol), timing
 
 
@@ -845,11 +794,9 @@ def _run_case(spec: CaseSpec, chip: str, runtime_mode: str) -> Dict[str, Any]:
         "add-scalar": _run_scalar,
         "mul-scalar": _run_scalar,
         "exp": _run_exp,
-        "sigmoid": _run_sigmoid,
         "reduce-sum": _run_reduction,
         "reduce-max": _run_reduction,
         "rsqrt": _run_rsqrt,
-        "rope": _run_rope,
         "gather": _run_gather,
         "topk": _run_topk,
     }

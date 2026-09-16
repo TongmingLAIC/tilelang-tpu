@@ -61,7 +61,7 @@ inline std::string AddressAttrKey(const std::string &data_var_name) {
 
 inline bool IsLocalMemoryScope(const std::string &scope) {
   return scope == "shared" || scope == "shared.dyn" || scope == "local" ||
-         scope == "local.fragment";
+         scope == "local.fragment" || scope == "local.matrix";
 }
 
 inline int64_t DivUp(int64_t value, int64_t factor) {
@@ -164,6 +164,18 @@ inline int64_t TpuAlignSizeBytes(const Array<PrimExpr> &shape, DataType dtype,
                                  const char *context) {
   return TpuAlignSizeBytesFromShape4(NormalizeLocalShape(shape, context),
                                      dtype);
+}
+
+inline int64_t TpuMatrixSizeBytes(const Array<PrimExpr> &shape, DataType dtype,
+                                  const char *context) {
+  ICHECK_EQ(shape.size(), 2U) << context << " expects a rank-2 matrix";
+  const int64_t rows = GetIntImmValue(shape[0], context);
+  const int64_t cols = GetIntImmValue(shape[1], context);
+  const int64_t elements_per_eu = kEuBytes / DTypeBytes(dtype);
+  ICHECK_EQ(cols % elements_per_eu, 0)
+      << context << " width must be a multiple of " << elements_per_eu;
+  return TpuAlignSizeBytesFromShape4(
+      {rows, DivUp(cols, elements_per_eu), 1, elements_per_eu}, dtype);
 }
 
 } // namespace tpuv7

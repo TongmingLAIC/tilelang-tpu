@@ -283,7 +283,18 @@ def _exclusive_pcie_device_lock(device_id: int):
 
     lock_path = _PCIE_DEVICE_LOCK_ROOT / f"tilelang-tpu-device-{device_id}.lock"
     try:
-        lock_file = lock_path.open("a+", encoding="utf-8")
+        # Opening an existing file with O_CREAT can be denied by Linux
+        # fs.protected_regular in a sticky /run/lock even when its group grants
+        # write access. Open an existing shared lock without O_CREAT, while
+        # retaining exclusive creation for the first owner and the creation
+        # race.
+        try:
+            lock_file = lock_path.open("r+", encoding="utf-8")
+        except FileNotFoundError:
+            try:
+                lock_file = lock_path.open("x+", encoding="utf-8")
+            except FileExistsError:
+                lock_file = lock_path.open("r+", encoding="utf-8")
     except OSError as error:
         raise TPUProfilingError(f"Cannot open PCIe device lock {lock_path}: {error}") from error
     with lock_file:

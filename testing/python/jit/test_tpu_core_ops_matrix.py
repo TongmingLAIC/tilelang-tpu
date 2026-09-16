@@ -369,7 +369,27 @@ def test_portable_copy_cases_are_worker_cases_and_default_matrix_cases():
 
     assert tuple(tpu_profile_worker._COPY_CASES) == expected
     assert expected == matrix_module._COPY_CASES
-    assert matrix_module._CASES[-len(expected):] == expected
+    assert all(case in matrix_module._CASES for case in expected)
+
+
+def test_fp16_bf16_conversion_cases_are_portable_matrix_cases():
+    expected = {
+        "copy-fp16-to-bf16": ("float16", "bfloat16"),
+        "copy-bf16-to-fp16": ("bfloat16", "float16"),
+    }
+    assert expected == tpu_profile_worker._CONVERSION_CASES
+    assert tuple(expected) == matrix_module._CONVERSION_CASES
+    assert matrix_module._CASES[-len(expected):] == tuple(expected)
+
+
+def test_fp32_transpose_a_cases_cover_overwrite_and_accumulation():
+    expected = {
+        "matmul-fp32-transpose-a-overwrite": False,
+        "matmul-fp32-transpose-a-accumulate": True,
+    }
+    assert expected == tpu_profile_worker._FP32_TRANSPOSE_A_CASES
+    assert tuple(expected) == matrix_module._FP32_TRANSPOSE_A_CASES
+    assert all(case in matrix_module._CASES for case in expected)
 
 
 def test_portable_max_cases_cover_dtypes_broadcast_and_negative_infinity():

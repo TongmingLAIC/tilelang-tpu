@@ -95,6 +95,7 @@ private:
     std::string descriptor;
     DataType dtype;
     std::vector<int> shape4;
+    std::string scope;
     size_t rank{0};
     bool is_local{false};
   };
@@ -108,6 +109,12 @@ private:
   void EmitRVCopy(const std::string &src, bool src_is_global,
                   const std::string &src_dtype, const std::string &dst,
                   bool dst_is_global, const std::string &dst_dtype);
+  void EmitTPUKernelMatrixCopy(const std::string &src, bool src_is_global,
+                               const std::string &dst, bool dst_is_global,
+                               DataType dtype, int64_t rows, int64_t cols);
+  void EmitRVMatrixCopy(const std::string &src, bool src_is_global,
+                        const std::string &dst, bool dst_is_global,
+                        DataType dtype, int64_t rows, int64_t cols);
   void EmitTPUKernelFill(const std::string &dst, DataType dtype, double value);
   void EmitRVFill(const std::string &dst, DataType dtype, double value);
   void EmitTPUKernelGemm(const std::string &a, const std::string &b,
@@ -133,13 +140,19 @@ private:
                          DataType src1_dtype, const std::vector<int> &dst_shape,
                          const std::vector<int> &src0_shape,
                          const std::vector<int> &src1_shape);
+  void EmitRVConstant(double value, const std::string &dtype);
+  void EmitRVScalar(const std::string &operation, const std::string &dst,
+                    const std::string &src, DataType dtype, double value);
+  void EmitRVReduction(const std::string &operation, const std::string &src,
+                       const std::string &dst, DataType dtype, int width);
+  void EmitRVExp(const std::string &dst, const std::string &work0,
+                 const std::string &work1, DataType dtype);
   void EmitRVDescriptor(const std::string &tensor, int register_id,
                         bool is_global, const std::string &dtype,
                         bool hw_aligned);
-  // Returns false only when op_name is not a registered TPU-Kernel semantic
-  // operation. Operand validation and instruction selection are owned by the
-  // TPU-Kernel translation unit.
-  bool TryEmitTPUKernelSemantic(const CallNode *op, const std::string &op_name);
+  // Shared extended semantic validation preserves the existing TPU-Kernel ABI.
+  // RV instruction sequences are implemented in codegen_rv.cc.
+  bool TryEmitTPUSemantic(const CallNode *op, const std::string &op_name);
 
   // Handle volatile loads.
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
@@ -153,7 +166,8 @@ private:
   std::string AllocLocalVarID(const tir::VarNode *v);
   SemanticTensorOperand ParseWholeBufferRegion(const PrimExpr &expr,
                                                const std::string &context,
-                                               int expected_access_mask) const;
+                                               int expected_access_mask,
+                                               bool allow_matrix = false) const;
   const std::vector<int> &DescriptorShape4(const VarNode *data_var,
                                            const std::string &context) const;
   // Global semantic operands carry Buffer::data variables, while generated

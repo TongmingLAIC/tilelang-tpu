@@ -76,6 +76,7 @@ else:
 
 _COPY_CASES = ("copy-fp32-local-roundtrip", "copy-fp32-global-to-global",
                "copy-fp16-local-roundtrip", "copy-fp16-global-to-global")
+_CONVERSION_CASES = ("copy-fp16-to-bf16", "copy-bf16-to-fp16")
 _MAX_CASES = ("elementwise-max-fp16-dense", "elementwise-max-bf16-dense",
               "elementwise-max-fp32-dense", "elementwise-max-fp16-broadcast",
               "elementwise-max-bf16-broadcast", "elementwise-max-fp32-broadcast",
@@ -83,8 +84,11 @@ _MAX_CASES = ("elementwise-max-fp16-dense", "elementwise-max-bf16-dense",
 _BROADCAST_CASES = tuple(
     f"elementwise-{operation}-{dtype}-broadcast" for operation in ("add", "sub", "mul", "div")
     for dtype in ("fp16", "bf16", "fp32"))
+_FP32_TRANSPOSE_A_CASES = ("matmul-fp32-transpose-a-overwrite",
+                           "matmul-fp32-transpose-a-accumulate")
 _CASES = ("elementwise-add", "elementwise-sub", "elementwise-mul", "elementwise-div",
-          *_BROADCAST_CASES, *_MAX_CASES, "matmul", *_COPY_CASES)
+          *_BROADCAST_CASES, *_MAX_CASES, "matmul", *_FP32_TRANSPOSE_A_CASES, *_COPY_CASES,
+          *_CONVERSION_CASES)
 _MATRIX_KIND = "tpu_core_ops"
 _SCHEMA_VERSION = 1
 _WORKER_RESULT_PREFIX = "TPU_CORE_NUMERIC_RESULT="

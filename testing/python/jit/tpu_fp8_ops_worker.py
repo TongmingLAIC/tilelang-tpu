@@ -1,6 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-"""Isolated numerical worker for the TPU-Kernel FP8 capability contract."""
+"""Isolated numerical worker for the TPU-Kernel/RV FP8 capability contract."""
 
 import argparse
 import json
@@ -38,18 +38,20 @@ _PCIE_GATE_VARIABLES = (
 )
 
 
-def _profile_selection() -> Tuple[str, str]:
+def _profile_selection() -> Tuple[str, str, str]:
     if os.environ.get("TILELANG_TPU_PROFILE_SESSION") != "1":
         raise RuntimeError("FP8 worker must run through TPUInstructionProfiler")
     chip = os.environ.get("TILELANG_TPU_PROFILE_CHIP", "")
     programming_model = os.environ.get("TILELANG_TPU_PROFILE_PROGRAMMING_MODEL", "")
     runtime_mode = os.environ.get("TILELANG_TPU_PROFILE_RUNTIME_MODE", "")
-    if programming_model != "tpukernel":
-        raise RuntimeError("FP8 capability worker requires programming_model=tpukernel")
+    if programming_model not in ("tpukernel", "rv"):
+        raise RuntimeError("FP8 capability worker requires programming_model=tpukernel or rv")
     if chip not in ("bm1690", "sg2260e"):
         raise RuntimeError("FP8 capability worker requires a supported TPU chip")
     if runtime_mode not in ("cmodel", "pcie"):
         raise RuntimeError("FP8 capability worker requires runtime_mode=cmodel or pcie")
+    if programming_model == "rv" and chip != "sg2260e":
+        raise RuntimeError("RV Tensor FP8 validation requires chip=sg2260e")
     if os.environ.get("TILELANG_TPU_BENCHMARK_RUNS") != "0":
         raise RuntimeError("FP8 profiling requires exactly one kernel launch")
     if runtime_mode == "cmodel":
@@ -73,11 +75,12 @@ def _profile_selection() -> Tuple[str, str]:
         device_id = os.environ.get("TILELANG_TPU_DEVICE_ID", "")
         if device_id != "0":
             raise RuntimeError("PCIe FP8 worker accepts only numeric device id 0")
-    return chip, runtime_mode
+    return chip, programming_model, runtime_mode
 
 
 def _target(chip: str) -> str:
-    return f"tpu -mcpu={chip} -tpu-programming-model=tpukernel"
+    programming_model = os.environ.get("TILELANG_TPU_PROFILE_PROGRAMMING_MODEL", "")
+    return f"tpu -mcpu={chip} -tpu-programming-model={programming_model}"
 
 
 def _elementwise_operation(case: str) -> str:
@@ -123,54 +126,67 @@ def _run_copy(dtype: str, torch_dtype: torch.dtype, chip: str, runtime_mode: str
         raise RuntimeError("same-format FP8 copy changed the encoded bytes")
 
 
-def _run_fill_zero(dtype: str, torch_dtype: torch.dtype, chip: str, runtime_mode: str) -> None:
+def _run_fill(dtype: str, torch_dtype: torch.dtype, chip: str, runtime_mode: str,
+              value: float) -> None:
 
     @T.prim_func
     def fill_kernel(B: T.Tensor((1, 64), dtype)):
         with T.Kernel(1, is_cpu=True) as _:
             local = T.alloc_shared((1, 64), dtype)
-            T.ppl_fill(local, T.float32(0))
+            T.ppl_fill(local, T.float32(value))
             T.ppl_copy(local, B)
 
-    output = torch.full((1, 64), 2.0, dtype=torch.float32).to(torch_dtype)
+    output = torch.full((1, 64), -2.0, dtype=torch.float32).to(torch_dtype)
     _compile(fill_kernel, chip, runtime_mode)(output)
-    if torch.count_nonzero(output.view(torch.uint8)).item() != 0:
-        raise RuntimeError("FP8 zero fill did not emit the all-zero encoding")
+    expected = torch.full((1, 64), value, dtype=torch.float32).to(torch_dtype)
+    if not torch.equal(output.view(torch.uint8), expected.view(torch.uint8)):
+        raise RuntimeError(f"FP8 fill({value}) disagrees with the framework encoding")
 
 
-def _run_cast(direction: str, dtype: str, torch_dtype: torch.dtype, chip: str,
+def _run_cast(case: str, dtype: str, torch_dtype: torch.dtype, chip: str,
               runtime_mode: str) -> None:
-    if direction == "to-fp8":
+    if case == "cast-to-fp8":
+        peer_dtype, peer_torch_dtype, to_fp8 = "float32", torch.float32, True
+    elif case == "cast-from-fp8":
+        peer_dtype, peer_torch_dtype, to_fp8 = "float32", torch.float32, False
+    else:
+        peer_name = "bfloat16" if "bf16" in case else "float16"
+        peer_dtype = peer_name
+        peer_torch_dtype = torch.bfloat16 if peer_name == "bfloat16" else torch.float16
+        to_fp8 = case.endswith("to-fp8")
+
+    if to_fp8:
 
         @T.prim_func
-        def cast_kernel(A: T.Tensor((1, 64), "float32"), B: T.Tensor((1, 64), dtype)):
+        def cast_kernel(A: T.Tensor((1, 64), peer_dtype), B: T.Tensor((1, 64), dtype)):
             with T.Kernel(1, is_cpu=True) as _:
-                src = T.alloc_shared((1, 64), "float32")
+                src = T.alloc_shared((1, 64), peer_dtype)
                 dst = T.alloc_shared((1, 64), dtype)
                 T.ppl_copy(A, src)
                 T.ppl_copy(src, dst)
                 T.ppl_copy(dst, B)
 
-        source = torch.linspace(-3.0, 3.0, 64, dtype=torch.float32).reshape(1, 64)
+        source = torch.linspace(
+            -3.0, 3.0, 64, dtype=torch.float32).to(peer_torch_dtype).reshape(1, 64)
         output = torch.zeros((1, 64), dtype=torch.float32).to(torch_dtype)
         expected = source.to(torch_dtype)
     else:
 
         @T.prim_func
-        def cast_kernel(A: T.Tensor((1, 64), dtype), B: T.Tensor((1, 64), "float32")):
+        def cast_kernel(A: T.Tensor((1, 64), dtype), B: T.Tensor((1, 64), peer_dtype)):
             with T.Kernel(1, is_cpu=True) as _:
                 src = T.alloc_shared((1, 64), dtype)
-                dst = T.alloc_shared((1, 64), "float32")
+                dst = T.alloc_shared((1, 64), peer_dtype)
                 T.ppl_copy(A, src)
                 T.ppl_copy(src, dst)
                 T.ppl_copy(dst, B)
 
         source = torch.linspace(-3.0, 3.0, 64, dtype=torch.float32).to(torch_dtype).reshape(1, 64)
-        output = torch.zeros((1, 64), dtype=torch.float32)
-        expected = source.float()
+        output = torch.zeros((1, 64), dtype=peer_torch_dtype)
+        expected = source.to(peer_torch_dtype)
 
     _compile(cast_kernel, chip, runtime_mode)(source, output)
-    if direction == "to-fp8":
+    if to_fp8:
         if not torch.equal(output.view(torch.uint8), expected.view(torch.uint8)):
             raise RuntimeError("FP32 to FP8 cast disagrees with the framework encoding")
     else:
@@ -260,57 +276,61 @@ def _run_scalar(operation: str, dtype: str, torch_dtype: torch.dtype, chip: str,
         _assert_close(output, expected, atol=0.25, rtol=0.0)
 
 
-def _run_rope(dtype: str, torch_dtype: torch.dtype, chip: str, runtime_mode: str) -> None:
-    shape = (4, 32)
-
-    @T.prim_func
-    def rope_kernel(A: T.Tensor(shape, dtype), B: T.Tensor(shape, dtype), C: T.Tensor(shape, dtype),
-                    D: T.Tensor(shape, dtype), Output: T.Tensor(shape, dtype)):
-        with T.Kernel(1, is_cpu=True) as _:
-            a = T.alloc_shared(shape, dtype)
-            b = T.alloc_shared(shape, dtype)
-            c = T.alloc_shared(shape, dtype)
-            d = T.alloc_shared(shape, dtype)
-            out = T.alloc_shared(shape, dtype)
-            T.ppl_copy(A, a)
-            T.ppl_copy(B, b)
-            T.ppl_copy(C, c)
-            T.ppl_copy(D, d)
-            T.ppl_rope_add(out, a, b, c, d)
-            T.ppl_copy(out, Output)
-
-    inputs = tuple(
-        (torch.arange(128, dtype=torch.float32).reshape(shape) % (7 + index) - 3.0).to(torch_dtype)
-        for index in range(4))
-    output = torch.zeros(shape, dtype=torch_dtype)
-    _compile(rope_kernel, chip, runtime_mode)(*inputs, output)
-    a, b, c, d = inputs
-    expected_fp32 = torch.empty(shape, dtype=torch.float32)
-    expected_fp32[:, 0::2] = a.float()[:, 0::2] + b.float()[:, 1::2]
-    expected_fp32[:, 1::2] = c.float()[:, 1::2] + d.float()[:, 0::2]
-    expected = expected_fp32.to(torch_dtype)
-    if not torch.equal(output.view(torch.uint8), expected.view(torch.uint8)):
-        _assert_close(output, expected, atol=0.5, rtol=0.0)
-
-
-def _run_gather(dtype: str, torch_dtype: torch.dtype, chip: str, runtime_mode: str) -> None:
+def _run_embedding(dtype: str, torch_dtype: torch.dtype, chip: str, runtime_mode: str) -> None:
     rows, width, count = 17, 32, 7
 
     @T.prim_func
-    def gather_kernel(param_buffer: T.Tensor((rows, width), dtype), index_buffer: T.Tensor(
+    def embedding_kernel(param_buffer: T.Tensor((rows, width), dtype), index_buffer: T.Tensor(
         (count, 1), "uint32"), output_buffer: T.Tensor((count, width), dtype)):
         with T.Kernel(1, is_cpu=True) as _:
-            T.ppl_gather(output_buffer, param_buffer, index_buffer, rows)
+            T.ppl_embedding(output_buffer, param_buffer, index_buffer)
 
     param = (torch.arange(rows * width, dtype=torch.float32).reshape(rows, width) % 19 -
              9.0).to(torch_dtype)
     index_i32 = torch.tensor([16, 0, 8, 3, 12, 1, 15], dtype=torch.int32).reshape(count, 1)
     index_u32 = index_i32.view(torch.uint32)
     output = torch.zeros((count, width), dtype=torch_dtype)
-    _compile(gather_kernel, chip, runtime_mode)(param, index_u32, output)
+    _compile(embedding_kernel, chip, runtime_mode)(param, index_u32, output)
     expected = param[index_i32.long().reshape(-1)]
     if not torch.equal(output.view(torch.uint8), expected.view(torch.uint8)):
-        raise RuntimeError("FP8 gather changed the selected encoded bytes")
+        raise RuntimeError("FP8 embedding changed the selected encoded bytes")
+
+
+def _run_reduction(operation: str, dtype: str, torch_dtype: torch.dtype, chip: str,
+                   runtime_mode: str) -> None:
+    rows, width = 4, 65
+
+    @T.prim_func
+    def reduction_kernel(A: T.Tensor((rows, width), dtype), C: T.Tensor((rows, 1), dtype)):
+        with T.Kernel(1, is_cpu=True) as _:
+            src = T.alloc_shared((rows, width), dtype)
+            out = T.alloc_shared((rows, 1), dtype)
+            T.ppl_copy(A, src)
+            if operation == "sum":
+                T.ppl_reduce_sum(src, out, dim=1)
+            else:
+                T.ppl_reduce_max(src, out, dim=1)
+            T.ppl_copy(out, C)
+
+    pattern = torch.linspace(-0.25, 0.25, rows * width, dtype=torch.float32)
+    source = pattern.to(torch_dtype).reshape(rows, width)
+    output = torch.zeros((rows, 1), dtype=torch_dtype)
+    _compile(reduction_kernel, chip, runtime_mode)(source, output)
+    if operation == "sum":
+        # RV maps the reduction to a deterministic chain of same-dtype adds;
+        # model the required FP8 rounding after each instruction.
+        expected = torch.zeros((rows, 1), dtype=torch_dtype)
+        for column in range(width):
+            expected = (expected.float() + source[:, column:column + 1].float()).to(torch_dtype)
+    else:
+        expected = torch.max(source.float(), dim=1, keepdim=True).values.to(torch_dtype)
+    if operation == "max":
+        if not torch.equal(output.view(torch.uint8), expected.view(torch.uint8)):
+            raise RuntimeError("FP8 reduce-max changed the selected operand encoding: "
+                               f"actual={output.float().reshape(-1).tolist()}, "
+                               f"expected={expected.float().reshape(-1).tolist()}")
+    else:
+        _assert_close(output, expected, atol=0.25, rtol=0.125)
 
 
 def _run_gemm(case: str, dtype: str, torch_dtype: torch.dtype, chip: str,
@@ -359,8 +379,13 @@ def main() -> None:
             "copy",
             "copy-global-to-global",
             "fill-zero",
+            "fill-nonzero",
             "cast-to-fp8",
             "cast-from-fp8",
+            "cast-fp16-to-fp8",
+            "cast-fp8-to-fp16",
+            "cast-bf16-to-fp8",
+            "cast-fp8-to-bf16",
             "add",
             "sub",
             "mul",
@@ -371,8 +396,9 @@ def main() -> None:
             "max-broadcast",
             "add-scalar",
             "mul-scalar",
-            "rope",
-            "gather",
+            "embedding",
+            "reduce-sum",
+            "reduce-max",
             "gemm-nn-overwrite",
             "gemm-nn-accumulate",
             "gemm-nt-overwrite",
@@ -382,9 +408,10 @@ def main() -> None:
     )
     args = parser.parse_args()
     chip = os.environ.get("TILELANG_TPU_PROFILE_CHIP", "")
+    programming_model = os.environ.get("TILELANG_TPU_PROFILE_PROGRAMMING_MODEL", "")
     runtime_mode = os.environ.get("TILELANG_TPU_PROFILE_RUNTIME_MODE", "")
     try:
-        chip, runtime_mode = _profile_selection()
+        chip, programming_model, runtime_mode = _profile_selection()
         dtype, torch_dtype = _DTYPES[args.dtype]
         if args.case in ("copy", "copy-global-to-global"):
             _run_copy(
@@ -394,10 +421,16 @@ def main() -> None:
                 runtime_mode,
                 direct_global=args.case == "copy-global-to-global",
             )
-        elif args.case == "fill-zero":
-            _run_fill_zero(dtype, torch_dtype, chip, runtime_mode)
+        elif args.case in ("fill-zero", "fill-nonzero"):
+            _run_fill(
+                dtype,
+                torch_dtype,
+                chip,
+                runtime_mode,
+                0.0 if args.case == "fill-zero" else 1.25,
+            )
         elif args.case.startswith("cast-"):
-            _run_cast(args.case[len("cast-"):], dtype, torch_dtype, chip, runtime_mode)
+            _run_cast(args.case, dtype, torch_dtype, chip, runtime_mode)
         elif args.case in ("add", "sub", "mul", "max", "add-broadcast", "sub-broadcast",
                            "mul-broadcast", "max-broadcast"):
             operation = _elementwise_operation(args.case)
@@ -417,10 +450,11 @@ def main() -> None:
                 chip,
                 runtime_mode,
             )
-        elif args.case == "rope":
-            _run_rope(dtype, torch_dtype, chip, runtime_mode)
-        elif args.case == "gather":
-            _run_gather(dtype, torch_dtype, chip, runtime_mode)
+        elif args.case == "embedding":
+            _run_embedding(dtype, torch_dtype, chip, runtime_mode)
+        elif args.case in ("reduce-sum", "reduce-max"):
+            _run_reduction(
+                args.case.removeprefix("reduce-"), dtype, torch_dtype, chip, runtime_mode)
         else:
             _run_gemm(args.case, dtype, torch_dtype, chip, runtime_mode)
     except BaseException as error:
@@ -428,7 +462,7 @@ def main() -> None:
             "schema_version": _RESULT_SCHEMA_VERSION,
             "status": "failed",
             "chip": chip,
-            "programming_model": "tpukernel",
+            "programming_model": programming_model,
             "runtime_mode": runtime_mode,
             "dtype": args.dtype,
             "case": args.case,
@@ -440,7 +474,7 @@ def main() -> None:
         "schema_version": _RESULT_SCHEMA_VERSION,
         "status": "passed",
         "chip": chip,
-        "programming_model": "tpukernel",
+        "programming_model": programming_model,
         "runtime_mode": runtime_mode,
         "dtype": args.dtype,
         "case": args.case,

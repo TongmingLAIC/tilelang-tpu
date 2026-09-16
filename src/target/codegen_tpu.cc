@@ -354,7 +354,8 @@ std::string CodeGenTileLangTPU::GetBufferRef(DataType t,
 CodeGenTileLangTPU::SemanticTensorOperand
 CodeGenTileLangTPU::ParseWholeBufferRegion(const PrimExpr &expr,
                                            const std::string &context,
-                                           int expected_access_mask) const {
+                                           int expected_access_mask,
+                                           bool allow_matrix) const {
   const auto *region = expr.as<CallNode>();
   ICHECK(region && region->op.same_as(tl::RegionOp::Get()))
       << context << " must be a canonical whole-buffer tl.region operand";
@@ -405,6 +406,10 @@ CodeGenTileLangTPU::ParseWholeBufferRegion(const PrimExpr &expr,
   const bool is_local = tl::tpuv7::IsLocalMemoryScope(scope);
   ICHECK(is_local || scope == "global")
       << context << " has unsupported Buffer scope " << scope;
+  ICHECK(allow_matrix || scope != "local.matrix")
+      << context
+      << " uses local.matrix storage, which is reserved for FP32 "
+         "GEMM and its global transfers";
 
   const VarNode *data_var = buffer->data.get();
   ICHECK(data_var && compiler_descriptor_vars_.count(data_var))
@@ -466,6 +471,7 @@ CodeGenTileLangTPU::ParseWholeBufferRegion(const PrimExpr &expr,
   operand.descriptor = std::move(descriptor);
   operand.dtype = dtype_it->second;
   operand.shape4 = shape_it->second;
+  operand.scope = scope;
   operand.rank = rank;
   operand.is_local = is_local;
   return operand;
@@ -638,9 +644,6 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
       ICHECK(operation != "div")
           << "TileLang TPU " << operation
           << " has no validated FP8 instruction contract";
-      ICHECK_EQ(target_programming_model_, "tpukernel")
-          << "FP8 " << operation
-          << " is validated only for the TPU-Kernel programming model";
     } else {
       ICHECK(dst_dtype == DataType::Float(16) ||
              dst_dtype == DataType::BFloat(16) ||
@@ -699,7 +702,11 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           op_name == "tl.tpu.copy" || op_name == "tl.tpu.fill" ||
           op_name == "tl.tpu.gemm" || op_name == "tl.tpu.add" ||
           op_name == "tl.tpu.sub" || op_name == "tl.tpu.mul" ||
-          op_name == "tl.tpu.div" || op_name == "tl.tpu.max";
+          op_name == "tl.tpu.div" || op_name == "tl.tpu.max" ||
+          op_name == "tl.tpu.add_scalar" || op_name == "tl.tpu.mul_scalar" ||
+          op_name == "tl.tpu.rsqrt" || op_name == "tl.tpu.reduce_sum" ||
+          op_name == "tl.tpu.reduce_max" || op_name == "tl.tpu.exp" ||
+          op_name == "tl.tpu.embedding";
       ICHECK(is_supported_portable_op)
           << "Unknown backend-neutral TPU operation " << op_name;
       ICHECK_EQ(rvt_direct_call_count_, 0)
@@ -825,7 +832,7 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
         ICHECK(is_local || is_global)
             << "Unsupported " << op_name << " buffer scope: " << scope
             << "; expected global or one of shared, shared.dyn, local, "
-               "local.fragment";
+               "local.fragment, local.matrix";
         ICHECK(is_zero(src_buffer->elem_offset))
             << op_name << " " << operand_name
             << " Buffer elem_offset is unsupported; construct an explicit "
@@ -899,6 +906,22 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
               << " local C-axis minimum must be zero; TPUv7 channels map "
                  "across NPU lanes and cannot use a linear LMEM byte offset";
         }
+        if (scope == "local.matrix") {
+          ICHECK_EQ(src_ranges.size(), src_buffer->shape.size());
+          arith::Analyzer matrix_analyzer;
+          for (size_t axis = 0; axis < src_ranges.size(); ++axis) {
+            ICHECK(is_zero(
+                matrix_analyzer.Simplify(range_min_base(src_ranges[axis]))))
+                << op_name
+                << " local.matrix transfers must cover the whole "
+                   "matrix from zero";
+            ICHECK(StructuralEqual()(
+                matrix_analyzer.Simplify(src_ranges[axis]->extent),
+                matrix_analyzer.Simplify(src_buffer->shape[axis])))
+                << op_name
+                << " local.matrix transfers must cover the whole matrix";
+          }
+        }
         check_copy_bounds(src_buffer, src_ranges, operand_name);
         std::string new_src_var =
             name_supply_->FreshName(src_buffer->data->name_hint);
@@ -962,8 +985,7 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
               ".stride, .addr = " + parent_var + ".addr + " + min_expr +
               ", .default_stride = " + parent_var + ".default_stride};\n");
         }
-        return std::make_tuple(new_src_var, is_global ? "global" : "local",
-                               dtype);
+        return std::make_tuple(new_src_var, scope, dtype);
       };
       tl::RegionOp src = parse_copy_region(op->args[1], "src", 1);
       tl::RegionOp dst = parse_copy_region(op->args[2], "dst", 2);
@@ -978,26 +1000,26 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
                "the same normalized N/C/H/W extents; source="
             << Dim4Initializer(src_shape4)
             << ", destination=" << Dim4Initializer(dst_shape4);
-        auto [src_var_id, src_flag, src_dtype] =
+        auto [src_var_id, src_scope, src_dtype] =
             process_copy(src, src_ranges, "src");
-        auto [dst_var_id, dst_flag, dst_dtype] =
+        auto [dst_var_id, dst_scope, dst_dtype] =
             process_copy(dst, dst_ranges, "dst");
         auto is_fp8 = [](const std::string &dtype) {
           return dtype == "DT_FP8E4M3" || dtype == "DT_FP8E5M2";
         };
         if (is_fp8(src_dtype) || is_fp8(dst_dtype)) {
-          ICHECK_EQ(target_programming_model_, "tpukernel")
-              << op_name
-              << " FP8 transport is validated only for the "
-                 "TPU-Kernel programming model";
           const bool same_format = src_dtype == dst_dtype;
-          const bool fp32_conversion =
-              (is_fp8(src_dtype) && dst_dtype == "DT_FP32") ||
-              (src_dtype == "DT_FP32" && is_fp8(dst_dtype));
-          ICHECK(same_format || fp32_conversion)
+          auto is_base_float = [](const std::string &dtype) {
+            return dtype == "DT_FP16" || dtype == "DT_BFP16" ||
+                   dtype == "DT_FP32";
+          };
+          const bool float_conversion =
+              (is_fp8(src_dtype) && is_base_float(dst_dtype)) ||
+              (is_base_float(src_dtype) && is_fp8(dst_dtype));
+          ICHECK(same_format || float_conversion)
               << op_name
-              << " FP8 supports same-format transport and the "
-                 "validated FP32 conversion boundary only";
+              << " FP8 supports same-format transport and conversion to or "
+                 "from FP16, BF16, or FP32 only";
         }
         // Region descriptors must be declared before either backend emits an
         // instruction that references them.
@@ -1006,8 +1028,31 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           stream << declaration;
         }
         inst.clear();
-        const bool src_is_global = src_flag == "global";
-        const bool dst_is_global = dst_flag == "global";
+        const bool src_is_global = src_scope == "global";
+        const bool dst_is_global = dst_scope == "global";
+        const bool matrix_copy =
+            src_scope == "local.matrix" || dst_scope == "local.matrix";
+        if (matrix_copy) {
+          ICHECK(src_dtype == "DT_FP32" && dst_dtype == "DT_FP32")
+              << op_name << " matrix layout currently supports FP32 only";
+          ICHECK(src_is_global != dst_is_global)
+              << op_name
+              << " matrix layout supports only global-to-local or "
+                 "local-to-global transfers";
+          ICHECK_EQ(src_ranges.size(), 2U)
+              << op_name << " matrix layout requires rank-2 regions";
+          const auto rows = src_shape4[1];
+          const auto cols = src_shape4[3];
+          if (target_programming_model_ == "rv") {
+            EmitRVMatrixCopy(src_var_id, src_is_global, dst_var_id,
+                             dst_is_global, DataType::Float(32), rows, cols);
+          } else {
+            EmitTPUKernelMatrixCopy(src_var_id, src_is_global, dst_var_id,
+                                    dst_is_global, DataType::Float(32), rows,
+                                    cols);
+          }
+          return;
+        }
         if (target_programming_model_ == "rv") {
           EmitRVCopy(src_var_id, src_is_global, src_dtype, dst_var_id,
                      dst_is_global, dst_dtype);
@@ -1047,14 +1092,16 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
       ICHECK_EQ(op->args.size(), 10U)
           << "tl.tpu.gemm requires the canonical 10-argument ABI, including "
              "an explicit accumulate flag";
-      auto a_operand = ParseWholeBufferRegion(op->args[1], op_name + " A", 1);
-      auto b_operand = ParseWholeBufferRegion(op->args[2], op_name + " B", 1);
+      auto a_operand =
+          ParseWholeBufferRegion(op->args[1], op_name + " A", 1, true);
+      auto b_operand =
+          ParseWholeBufferRegion(op->args[2], op_name + " B", 1, true);
       const auto *accumulate_imm = op->args[9].as<IntImmNode>();
       ICHECK(accumulate_imm && accumulate_imm->dtype.is_bool())
           << "tl.tpu.gemm accumulate must be a compile-time boolean";
       bool accumulate = accumulate_imm->value != 0;
       auto c_operand = ParseWholeBufferRegion(op->args[3], op_name + " C",
-                                              accumulate ? 3 : 2);
+                                              accumulate ? 3 : 2, true);
       ICHECK(a_operand.is_local && b_operand.is_local && c_operand.is_local)
           << op_name
           << " operands must all have compiler-owned local descriptors";
@@ -1115,6 +1162,18 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
       auto a_dtype = a_operand.dtype;
       auto b_dtype = b_operand.dtype;
       auto c_dtype = c_operand.dtype;
+      const bool fp32_gemm = a_dtype == DataType::Float(32);
+      if (fp32_gemm) {
+        ICHECK(a_operand.scope == "local.matrix" &&
+               b_operand.scope == "local.matrix" &&
+               c_operand.scope == "local.matrix")
+            << op_name << " FP32 operands must use local.matrix storage";
+      } else {
+        ICHECK(a_operand.scope != "local.matrix" &&
+               b_operand.scope != "local.matrix" &&
+               c_operand.scope != "local.matrix")
+            << op_name << " local.matrix storage is reserved for FP32 GEMM";
+      }
       if (target_programming_model_ == "rv") {
         EmitRVGemm(a_access_data, b_access_data, c_access_data, a_dtype,
                    b_dtype, c_dtype, trans_A, trans_B, accumulate, M, N, K);
@@ -1133,9 +1192,13 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
       handle_elementwise("div");
     } else if (op_name == "tl.tpu.max") {
       handle_elementwise("max");
-    } else if (is_tpukernel_extern) {
-      ICHECK(TryEmitTPUKernelSemantic(op, op_name))
-          << "Unknown TPU-Kernel semantic operation " << op_name;
+    } else if (is_tpukernel_extern || is_portable_tpu_op) {
+      ICHECK(TryEmitTPUSemantic(op, op_name))
+          << "Unknown TPU semantic operation " << op_name;
+      if (target_programming_model_ == "rv") {
+        // Complete composite uses before the allocator may reuse their LMEM.
+        stream << "rvt_sync_i(0xdeadbeef, 0);\n";
+      }
     } else {
       ICHECK(is_rvt_extern)
           << "Unknown external call " << op_name

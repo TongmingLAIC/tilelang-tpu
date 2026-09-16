@@ -150,11 +150,15 @@ TPU-Kernel or RV Tensor according to the selected target:
 - `T.ppl_add`, `T.ppl_subtract`, `T.ppl_mul`, and `T.ppl_div`
 - `T.ppl_max`
 
-TPU-Kernel also provides scalar arithmetic, `exp`, `sigmoid`, `rsqrt`, sum and
-maximum reductions, gather, top-k, and RoPE primitives. The `T.rvt_*` namespace
-is a low-level SG2260E interface for kernels that need to manage RV Tensor
-descriptors directly; it must not be mixed with high-level `T.ppl_*` semantics
-inside one kernel.
+Both programming models provide scalar arithmetic, `exp`, `rsqrt`, sum/max
+reductions, and portable embedding lookup, subject to the documented dtype
+matrix. TPU-Kernel additionally exposes backend-specific gather and BM1690
+top-k operations. The `T.rvt_*` namespace is a low-level SG2260E interface for
+kernels that manage RV Tensor descriptors directly; it must not be mixed with
+high-level `T.ppl_*` semantics inside one kernel. See the
+[`tpu_demo` guide](./tpu_demo/README.md) for examples and the
+[`T.ppl_*` mapping](./tpu_demo/OP_MAPPING.md) for exact instruction and dtype
+support.
 
 Operator shapes and data types are checked during lowering. Dimensions must be
 positive compile-time integers, and tiled dimensions must divide evenly unless

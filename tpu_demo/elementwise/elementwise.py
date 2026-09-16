@@ -20,26 +20,67 @@ def build_elementwise(operation: str, *, rows: int = 4, width: int = 32, dtype: 
     validate_dimensions("elementwise", rows=rows, width=width)
     shape = (rows, width)
 
+    if operation == "add":
+
+        @T.prim_func
+        def elementwise_add(lhs: T.Tensor(shape, dtype), rhs: T.Tensor(shape, dtype),
+                            dst: T.Tensor(shape, dtype)):
+            with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
+                lhs_local = T.alloc_shared(shape, dtype)
+                rhs_local = T.alloc_shared(shape, dtype)
+                dst_local = T.alloc_shared(shape, dtype)
+                T.ppl_copy(lhs, lhs_local)
+                T.ppl_copy(rhs, rhs_local)
+                T.ppl_add(dst_local, lhs_local, rhs_local)
+                T.ppl_copy(dst_local, dst)
+
+        return elementwise_add
+
+    if operation == "sub":
+
+        @T.prim_func
+        def elementwise_sub(lhs: T.Tensor(shape, dtype), rhs: T.Tensor(shape, dtype),
+                            dst: T.Tensor(shape, dtype)):
+            with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
+                lhs_local = T.alloc_shared(shape, dtype)
+                rhs_local = T.alloc_shared(shape, dtype)
+                dst_local = T.alloc_shared(shape, dtype)
+                T.ppl_copy(lhs, lhs_local)
+                T.ppl_copy(rhs, rhs_local)
+                T.ppl_subtract(dst_local, lhs_local, rhs_local)
+                T.ppl_copy(dst_local, dst)
+
+        return elementwise_sub
+
+    if operation == "mul":
+
+        @T.prim_func
+        def elementwise_mul(lhs: T.Tensor(shape, dtype), rhs: T.Tensor(shape, dtype),
+                            dst: T.Tensor(shape, dtype)):
+            with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
+                lhs_local = T.alloc_shared(shape, dtype)
+                rhs_local = T.alloc_shared(shape, dtype)
+                dst_local = T.alloc_shared(shape, dtype)
+                T.ppl_copy(lhs, lhs_local)
+                T.ppl_copy(rhs, rhs_local)
+                T.ppl_mul(dst_local, lhs_local, rhs_local)
+                T.ppl_copy(dst_local, dst)
+
+        return elementwise_mul
+
     @T.prim_func
-    def kernel(lhs: T.Tensor(shape, dtype), rhs: T.Tensor(shape, dtype),
-               dst: T.Tensor(shape, dtype)):
+    def elementwise_div(lhs: T.Tensor(shape, dtype), rhs: T.Tensor(shape, dtype),
+                        dst: T.Tensor(shape, dtype)):
         with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
             lhs_local = T.alloc_shared(shape, dtype)
             rhs_local = T.alloc_shared(shape, dtype)
             dst_local = T.alloc_shared(shape, dtype)
             T.ppl_copy(lhs, lhs_local)
             T.ppl_copy(rhs, rhs_local)
-            if operation == "add":
-                T.ppl_add(dst_local, lhs_local, rhs_local)
-            elif operation == "sub":
-                T.ppl_subtract(dst_local, lhs_local, rhs_local)
-            elif operation == "mul":
-                T.ppl_mul(dst_local, lhs_local, rhs_local)
-            else:
-                T.ppl_div(dst_local, lhs_local, rhs_local)
+            T.ppl_div(dst_local, lhs_local, rhs_local)
             T.ppl_copy(dst_local, dst)
 
-    return kernel
+    return elementwise_div
 
 
 def run(*,

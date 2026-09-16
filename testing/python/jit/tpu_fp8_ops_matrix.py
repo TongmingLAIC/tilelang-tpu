@@ -1,6 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-"""Run the TPU-Kernel FP8 capability matrix in supervised fresh processes.
+"""Run the TPU-Kernel/RV FP8 capability matrix in supervised fresh processes.
 
 CModel remains the safe default. A PCIe run promotes matching, clean BM1690
 and SG2260E CModel evidence: it compiles a read-only Git snapshot, pins the
@@ -77,12 +77,18 @@ _MATRIX_KIND = "tpu_fp8_ops"
 _SCHEMA_VERSION = 1
 _WORKER_RESULT_PREFIX = "TPU_FP8_NUMERIC_RESULT="
 _DTYPES = ("e4m3", "e5m2")
+_PROGRAMMING_MODELS = ("tpukernel", "rv")
 _CASES = (
     "copy",
     "copy-global-to-global",
     "fill-zero",
+    "fill-nonzero",
     "cast-to-fp8",
     "cast-from-fp8",
+    "cast-fp16-to-fp8",
+    "cast-fp8-to-fp16",
+    "cast-bf16-to-fp8",
+    "cast-fp8-to-bf16",
     "add",
     "sub",
     "mul",
@@ -93,13 +99,27 @@ _CASES = (
     "max-broadcast",
     "add-scalar",
     "mul-scalar",
-    "rope",
-    "gather",
+    "embedding",
+    "reduce-sum",
+    "reduce-max",
     "gemm-nn-overwrite",
     "gemm-nn-accumulate",
     "gemm-nt-overwrite",
     "gemm-nt-accumulate",
 )
+_TPUKERNEL_UNSUPPORTED_CASES = frozenset({"reduce-sum"})
+
+
+def _selected_cases(args: argparse.Namespace) -> tuple[str, ...]:
+    """Return the explicit or backend-specific default FP8 case set."""
+    cases = tuple(args.cases) if args.cases else tuple(
+        case for case in _CASES
+        if args.programming_model != "tpukernel" or case not in _TPUKERNEL_UNSUPPORTED_CASES)
+    unsupported = _TPUKERNEL_UNSUPPORTED_CASES.intersection(cases)
+    if args.programming_model == "tpukernel" and unsupported:
+        raise RuntimeError("TPU-Kernel has no validated FP8 implementation for: " +
+                           ", ".join(sorted(unsupported)))
+    return cases
 
 
 def _parse_args() -> argparse.Namespace:
@@ -108,6 +128,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--runtime-mode", choices=("cmodel", "pcie"), default="cmodel")
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--chip", choices=_CHIPS, action="append", dest="chips")
+    parser.add_argument(
+        "--programming-model",
+        choices=_PROGRAMMING_MODELS,
+        default="tpukernel",
+    )
     parser.add_argument("--dtype", choices=_DTYPES, action="append", dest="dtypes")
     parser.add_argument("--case", choices=_CASES, action="append", dest="cases")
     parser.add_argument("--device-id", type=int)
@@ -147,6 +172,9 @@ def _validate_args(args: argparse.Namespace) -> None:
             "PCIe acknowledgements, promotion, and decoder options are invalid for CModel")
     elif args.chips is None or len(args.chips) != 1:
         raise RuntimeError("CModel promotion requires exactly one explicit --chip")
+    if args.programming_model == "rv" and args.chips != ["sg2260e"]:
+        raise RuntimeError("RV Tensor FP8 validation requires exactly --chip sg2260e")
+    _selected_cases(args)
 
 
 def _worker_environment(repo_root: Path, scratch: Path, runtime_mode: str,
@@ -161,7 +189,7 @@ def _profiling_config(args: argparse.Namespace, output_dir: Path, chip: str,
                       label: str) -> TPUProfilingConfig:
     return TPUProfilingConfig(
         chip=chip,
-        programming_model="tpukernel",
+        programming_model=args.programming_model,
         runtime_mode=args.runtime_mode,
         output_dir=output_dir,
         label=label,
@@ -192,6 +220,7 @@ def _validate_worker_payload(
     payload: Mapping[str, Any],
     *,
     chip: str,
+    programming_model: str,
     runtime_mode: str,
     dtype: str,
     case: str,
@@ -201,7 +230,7 @@ def _validate_worker_payload(
     expected = {
         "status": "passed",
         "chip": chip,
-        "programming_model": "tpukernel",
+        "programming_model": programming_model,
         "runtime_mode": runtime_mode,
         "dtype": dtype,
         "case": case,
@@ -222,7 +251,12 @@ def _validate_pcie_promotion(
     current_toolchain: Mapping[str, Any],
     pcie_started_at: str,
 ) -> dict[str, Any]:
-    """Require content-identical BM1690 and SG2260E CModel FP8 evidence."""
+    """Require matching BM1690 and SG2260E CModel FP8 evidence.
+
+    BM1690 contributes TPU-Kernel evidence for cases shared by both programming
+    models.  RV-only cases still require passing SG2260E/RV evidence, but cannot
+    require a nonexistent BM1690/RV result or an unsupported TPU-Kernel result.
+    """
     assert args.bm_cmodel_summary is not None and args.sg_cmodel_summary is not None
     if (current_toolchain.get("runtime_mode") != "pcie" or
             not isinstance(current_toolchain.get("pcie"), dict)):
@@ -244,16 +278,19 @@ def _validate_pcie_promotion(
         matrix_kind=_MATRIX_KIND,
         schema_version=_SCHEMA_VERSION,
         bm_allowed_scope=(("bm1690", "tpukernel"),),
-        sg_allowed_scope=(("sg2260e", "tpukernel"),),
+        sg_allowed_scope=(("sg2260e", "tpukernel"), ("sg2260e", "rv")),
         pcie_started_at=pcie_started_at,
     )
-    for label, payload in (("BM1690", bm), ("SG2260E", sg)):
+    for label, payload, expected_model in (
+        ("BM1690", bm, "tpukernel"),
+        ("SG2260E", sg, args.programming_model),
+    ):
         if payload.get("git_commit") != commit:
             raise RuntimeError(f"{label} FP8 summary commit does not match current source")
         if payload.get("source_state_sha256") != source_digest:
             raise RuntimeError(f"{label} FP8 summary source digest does not match current source")
-        if payload.get("programming_model") != "tpukernel":
-            raise RuntimeError(f"{label} FP8 summary is not TPU-Kernel evidence")
+        if payload.get("programming_model") != expected_model:
+            raise RuntimeError(f"{label} FP8 summary is not {expected_model} evidence")
         observed_toolchain = payload.get("toolchain_identity")
         if not isinstance(observed_toolchain, dict):
             raise RuntimeError(f"{label} FP8 summary has no toolchain identity")
@@ -271,12 +308,15 @@ def _validate_pcie_promotion(
     if not isinstance(bm_results, dict) or not isinstance(sg_results, dict):
         raise RuntimeError("FP8 promotion summary has no case result map")
     missing = []
+    bm_cases = tuple(case for case in cases if case not in _TPUKERNEL_UNSUPPORTED_CASES)
     for dtype in dtypes:
         for case in cases:
-            for key, results in (
-                (f"bm1690/tpukernel/{dtype}/{case}", bm_results),
-                (f"sg2260e/tpukernel/{dtype}/{case}", sg_results),
-            ):
+            required_results = [(f"sg2260e/{args.programming_model}/{dtype}/{case}",
+                                 sg_results, args.programming_model)]
+            if case in bm_cases:
+                required_results.insert(
+                    0, (f"bm1690/tpukernel/{dtype}/{case}", bm_results, "tpukernel"))
+            for key, results, expected_model in required_results:
                 result = results.get(key)
                 if not isinstance(result, dict) or result.get("status") != "passed":
                     missing.append(key)
@@ -287,12 +327,13 @@ def _validate_pcie_promotion(
                 numeric = result.get("numeric")
                 if not isinstance(numeric, dict):
                     raise RuntimeError(f"FP8 promotion result has no numeric payload: {key}")
-                expected_chip, expected_model, expected_dtype, expected_case = key.split("/", 3)
-                if expected_model != "tpukernel":
+                expected_chip, key_model, expected_dtype, expected_case = key.split("/", 3)
+                if key_model != expected_model:
                     raise RuntimeError(f"FP8 promotion result has the wrong model: {key}")
                 _validate_worker_payload(
                     numeric,
                     chip=expected_chip,
+                    programming_model=expected_model,
                     runtime_mode="cmodel",
                     dtype=expected_dtype,
                     case=expected_case,
@@ -308,6 +349,8 @@ def _validate_pcie_promotion(
         "sg2260e_summary": sg["_resolved_path"],
         "sg2260e_summary_sha256": sg["_sha256"],
         "validated_case_count": len(dtypes) * len(cases),
+        "bm1690_validated_case_count": len(dtypes) * len(bm_cases),
+        "sg2260e_validated_case_count": len(dtypes) * len(cases),
     }
 
 
@@ -315,13 +358,13 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                 environment: Mapping[str, str]) -> int:
     chips = tuple(args.chips or _CHIPS)
     dtypes = tuple(args.dtypes or _DTYPES)
-    cases = tuple(args.cases or _CASES)
+    cases = _selected_cases(args)
     summary: dict[str, Any] = {
         "schema_version": _SCHEMA_VERSION,
         "matrix_kind": _MATRIX_KIND,
         "status": "running",
         "runtime_mode": args.runtime_mode,
-        "programming_model": "tpukernel",
+        "programming_model": args.programming_model,
         "acceptance":
             ("numeric-raw-and-decoded-timing" if args.require_decoded_timing else "numeric-and-raw"
             ),
@@ -334,10 +377,10 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
         "passed_case_count": 0,
         "failed_case_count": 0,
         "cancelled_case_count": 0,
-        "target_scope": matrix_target_scope((chip, "tpukernel") for chip in chips),
+        "target_scope": matrix_target_scope((chip, args.programming_model) for chip in chips),
         "scheduled": [{
             "chip": chip,
-            "programming_model": "tpukernel",
+            "programming_model": args.programming_model,
             "dtype": dtype,
             "case": case,
         } for chip in chips for dtype in dtypes for case in cases],
@@ -411,7 +454,7 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
     for chip in chips:
         for dtype in dtypes:
             for case in cases:
-                key = f"{chip}/tpukernel/{dtype}/{case}"
+                key = f"{chip}/{args.programming_model}/{dtype}/{case}"
                 print(f"RUN {key}", flush=True)
                 command = [sys.executable, str(worker), "--dtype", dtype, "--case", case]
                 launch_attempted = False
@@ -424,7 +467,7 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                                                             summary["toolchain_identity"])
                     profiler = TPUInstructionProfiler(
                         _profiling_config(args, output_dir, chip,
-                                          f"{chip}-tpukernel-{dtype}-{case}"))
+                                          f"{chip}-{args.programming_model}-{dtype}-{case}"))
                     launch_attempted = True
                     report = (
                         profiler.run_pcie(command, environment=worker_environment_values)
@@ -436,6 +479,7 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                     _validate_worker_payload(
                         numeric,
                         chip=chip,
+                        programming_model=args.programming_model,
                         runtime_mode=args.runtime_mode,
                         dtype=dtype,
                         case=case,
@@ -564,7 +608,7 @@ def main() -> int:
     _validate_args(args)
     chips = tuple(args.chips or _CHIPS)
     dtypes = tuple(args.dtypes or _DTYPES)
-    cases = tuple(args.cases or _CASES)
+    cases = _selected_cases(args)
     if (len(set(chips)) != len(chips) or len(set(dtypes)) != len(dtypes) or
             len(set(cases)) != len(cases)):
         raise RuntimeError("duplicate chip, dtype, or case selections are not allowed")
@@ -606,7 +650,7 @@ def main() -> int:
                         "schema_version": _SCHEMA_VERSION,
                         "matrix_kind": _MATRIX_KIND,
                         "runtime_mode": "pcie",
-                        "programming_model": "tpukernel",
+                        "programming_model": args.programming_model,
                         "started_at": _utc_now()
                     })
                     failure.update(git_source_identity(repo_root))

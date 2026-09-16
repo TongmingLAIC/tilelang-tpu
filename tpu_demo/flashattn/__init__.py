@@ -1,6 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-"""TPU fused-attention demo."""
+"""Portable TPU online-softmax attention demo."""
 
 from .flashattn import build_flashattn, run
 

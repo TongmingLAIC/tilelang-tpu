@@ -16,6 +16,7 @@ import tpu_fp8_ops_worker as worker
 def _args(runtime_mode="cmodel", **overrides):
     values = {
         "runtime_mode": runtime_mode,
+        "programming_model": "tpukernel",
         "output_dir": Path("matrix-output"),
         "timeout": 10.0,
         "chips": ["sg2260e"],
@@ -117,12 +118,16 @@ def _report(*, decoded=False):
     )
 
 
-def _profile_environment(monkeypatch, runtime_mode, *, chip="sg2260e"):
+def _profile_environment(monkeypatch,
+                         runtime_mode,
+                         *,
+                         chip="sg2260e",
+                         programming_model="tpukernel"):
     for name in worker._PCIE_GATE_VARIABLES:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("TILELANG_TPU_PROFILE_SESSION", "1")
     monkeypatch.setenv("TILELANG_TPU_PROFILE_CHIP", chip)
-    monkeypatch.setenv("TILELANG_TPU_PROFILE_PROGRAMMING_MODEL", "tpukernel")
+    monkeypatch.setenv("TILELANG_TPU_PROFILE_PROGRAMMING_MODEL", programming_model)
     monkeypatch.setenv("TILELANG_TPU_PROFILE_RUNTIME_MODE", runtime_mode)
     monkeypatch.setenv("TILELANG_TPU_BENCHMARK_RUNS", "0")
 
@@ -147,12 +152,17 @@ def _patch_identity(monkeypatch, runtime_mode):
     return source, toolchain
 
 
-def _fp8_worker_payload(*, chip="sg2260e", runtime_mode="cmodel", dtype="e4m3", case="copy"):
+def _fp8_worker_payload(*,
+                        chip="sg2260e",
+                        programming_model="tpukernel",
+                        runtime_mode="cmodel",
+                        dtype="e4m3",
+                        case="copy"):
     return {
         "schema_version": 1,
         "status": "passed",
         "chip": chip,
-        "programming_model": "tpukernel",
+        "programming_model": programming_model,
         "runtime_mode": runtime_mode,
         "dtype": dtype,
         "case": case,
@@ -168,7 +178,12 @@ def test_fp8_worker_payload_requires_one_exact_structured_result(tmp_path):
     stdout.write_text(matrix._WORKER_RESULT_PREFIX + json.dumps(payload) + "\n", encoding="utf-8")
     parsed = matrix._worker_payload(stdout)
     matrix._validate_worker_payload(
-        parsed, chip="sg2260e", runtime_mode="cmodel", dtype="e4m3", case="copy")
+        parsed,
+        chip="sg2260e",
+        programming_model="tpukernel",
+        runtime_mode="cmodel",
+        dtype="e4m3",
+        case="copy")
 
     stdout.write_text(
         "\n".join((matrix._WORKER_RESULT_PREFIX + json.dumps(payload),) * 2),
@@ -198,12 +213,17 @@ def test_fp8_worker_payload_rejects_misattributed_result(field, value):
     payload[field] = value
     with pytest.raises(RuntimeError, match="schema_version|scheduled case|metrics"):
         matrix._validate_worker_payload(
-            payload, chip="sg2260e", runtime_mode="cmodel", dtype="e4m3", case="copy")
+            payload,
+            chip="sg2260e",
+            programming_model="tpukernel",
+            runtime_mode="cmodel",
+            dtype="e4m3",
+            case="copy")
 
 
 def test_fp8_worker_failure_emits_one_structured_result(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["tpu_fp8_ops_worker.py", "--dtype", "e4m3", "--case", "copy"])
-    monkeypatch.setattr(worker, "_profile_selection", lambda: ("sg2260e", "cmodel"))
+    monkeypatch.setattr(worker, "_profile_selection", lambda: ("sg2260e", "tpukernel", "cmodel"))
     monkeypatch.setattr(
         worker, "_run_copy", lambda *_args, **_kwargs:
         (_ for _ in ()).throw(RuntimeError("numeric failure")))
@@ -284,8 +304,9 @@ def test_cmodel_worker_rejects_inherited_pcie_gate(monkeypatch):
         worker._profile_selection()
 
 
-def test_pcie_worker_accepts_only_sg2260e_device_zero_and_all_gates(monkeypatch):
-    _profile_environment(monkeypatch, "pcie")
+@pytest.mark.parametrize("programming_model", ("tpukernel", "rv"))
+def test_pcie_worker_accepts_only_sg2260e_device_zero_and_all_gates(monkeypatch, programming_model):
+    _profile_environment(monkeypatch, "pcie", programming_model=programming_model)
     monkeypatch.setenv("TILELANG_TPU_ALLOW_PCIE_LOAD", "1")
     monkeypatch.setenv("TILELANG_TPU_ALLOW_PCIE_PROFILE", "1")
     monkeypatch.setenv("TILELANG_TPU_DEVICE_ID", "0")
@@ -293,19 +314,31 @@ def test_pcie_worker_accepts_only_sg2260e_device_zero_and_all_gates(monkeypatch)
         worker._profile_selection()
 
     monkeypatch.setenv("BMLIB_ENABLE_ALL_PROFILE", "1")
-    assert worker._profile_selection() == ("sg2260e", "pcie")
+    assert worker._profile_selection() == ("sg2260e", programming_model, "pcie")
     monkeypatch.setenv("TILELANG_TPU_DEVICE_ID", "1")
     with pytest.raises(RuntimeError, match="only numeric device id 0"):
         worker._profile_selection()
     monkeypatch.setenv("TILELANG_TPU_DEVICE_ID", "0")
     monkeypatch.setenv("TILELANG_TPU_PROFILE_CHIP", "bm1690")
-    with pytest.raises(RuntimeError, match="only chip=sg2260e"):
+    with pytest.raises(RuntimeError, match="chip=sg2260e"):
         worker._profile_selection()
 
 
 def test_validate_args_accepts_only_explicit_promoted_pcie_scope():
     matrix._validate_args(_args("pcie"))
     matrix._validate_args(_args("pcie", cases=None, all_pcie_cases=True))
+    matrix._validate_args(_args("pcie", programming_model="rv"))
+    matrix._validate_args(_args("pcie", programming_model="rv", cases=None, all_pcie_cases=True))
+
+
+def test_default_fp8_cases_are_programming_model_specific():
+    tpukernel = matrix._selected_cases(_args(cases=None))
+    rv = matrix._selected_cases(_args(cases=None, programming_model="rv"))
+    assert "reduce-max" in tpukernel
+    assert "reduce-sum" not in tpukernel
+    assert "reduce-sum" in rv
+    with pytest.raises(RuntimeError, match="no validated FP8 implementation"):
+        matrix._validate_args(_args(cases=["reduce-sum"]))
 
 
 @pytest.mark.parametrize(
@@ -400,7 +433,7 @@ def test_worker_environment_delegates_sanitization_and_owns_scratch(monkeypatch,
     assert result["PYTHONDONTWRITEBYTECODE"] == "1"
 
 
-def _promotion_summary(chip):
+def _promotion_summary(chip, programming_model="tpukernel"):
     if chip == "bm1690":
         started_at, finished_at = ("2026-09-08T00:00:00+00:00", "2026-09-08T00:01:00+00:00")
     else:
@@ -411,7 +444,7 @@ def _promotion_summary(chip):
         "status": "passed",
         "complete": True,
         "runtime_mode": "cmodel",
-        "programming_model": "tpukernel",
+        "programming_model": programming_model,
         "implementation_worktree_dirty": False,
         "git_commit": _source_identity()["git_commit"],
         "source_state_sha256": _source_identity()["source_state_sha256"],
@@ -424,37 +457,44 @@ def _promotion_summary(chip):
         "failed_case_count": 0,
         "target_scope": [{
             "chip": chip,
-            "programming_model": "tpukernel",
+            "programming_model": programming_model,
         }],
         "scheduled": [{
             "chip": chip,
-            "programming_model": "tpukernel",
+            "programming_model": programming_model,
             "dtype": "e4m3",
             "case": "copy",
         }],
         "cases": {
-            f"{chip}/tpukernel/e4m3/copy": {
+            f"{chip}/{programming_model}/e4m3/copy": {
                 "status": "passed",
                 "raw_instruction_count": 1,
-                "numeric": _fp8_worker_payload(chip=chip),
+                "numeric": _fp8_worker_payload(chip=chip, programming_model=programming_model),
             },
         },
     }
 
 
-def _promotion_fixture(monkeypatch, tmp_path):
+def _promotion_fixture(monkeypatch, tmp_path, programming_model="tpukernel"):
     monkeypatch.setattr(matrix, "git_source_identity", lambda _root: _source_identity())
     bm = _promotion_summary("bm1690")
-    sg = _promotion_summary("sg2260e")
+    sg = _promotion_summary("sg2260e", programming_model)
     bm_path, sg_path = tmp_path / "bm.json", tmp_path / "sg.json"
     bm_path.write_text(json.dumps(bm), encoding="utf-8")
     sg_path.write_text(json.dumps(sg), encoding="utf-8")
-    args = _args("pcie", bm_cmodel_summary=bm_path, sg_cmodel_summary=sg_path)
+    args = _args(
+        "pcie",
+        programming_model=programming_model,
+        bm_cmodel_summary=bm_path,
+        sg_cmodel_summary=sg_path,
+    )
     return SimpleNamespace(bm=bm, sg=sg, bm_path=bm_path, sg_path=sg_path, args=args)
 
 
-def test_pcie_promotion_accepts_same_clean_source_and_content_toolchain(monkeypatch, tmp_path):
-    fixture = _promotion_fixture(monkeypatch, tmp_path)
+@pytest.mark.parametrize("programming_model", ("tpukernel", "rv"))
+def test_pcie_promotion_accepts_same_clean_source_and_content_toolchain(
+        monkeypatch, tmp_path, programming_model):
+    fixture = _promotion_fixture(monkeypatch, tmp_path, programming_model)
     evidence = matrix._validate_pcie_promotion(
         tmp_path,
         fixture.args,
@@ -466,6 +506,42 @@ def test_pcie_promotion_accepts_same_clean_source_and_content_toolchain(monkeypa
     assert evidence["validated_case_count"] == 1
     assert len(evidence["bm1690_summary_sha256"]) == 64
     assert len(evidence["sg2260e_summary_sha256"]) == 64
+
+
+def test_rv_promotion_requires_sg_evidence_but_not_unsupported_bm_reduce_sum(
+        monkeypatch, tmp_path):
+    fixture = _promotion_fixture(monkeypatch, tmp_path, "rv")
+    reduce_sum_key = "sg2260e/rv/e4m3/reduce-sum"
+    fixture.sg["scheduled"].append({
+        "chip": "sg2260e",
+        "programming_model": "rv",
+        "dtype": "e4m3",
+        "case": "reduce-sum",
+    })
+    fixture.sg["cases"][reduce_sum_key] = {
+        "status": "passed",
+        "raw_instruction_count": 1,
+        "numeric": _fp8_worker_payload(
+            programming_model="rv",
+            case="reduce-sum",
+        ),
+    }
+    for field in ("scheduled_case_count", "completed_case_count", "passed_case_count"):
+        fixture.sg[field] = 2
+    fixture.sg_path.write_text(json.dumps(fixture.sg), encoding="utf-8")
+
+    evidence = matrix._validate_pcie_promotion(
+        tmp_path,
+        fixture.args,
+        ("e4m3",),
+        ("copy", "reduce-sum"),
+        _toolchain_identity("pcie"),
+        "2026-09-08T00:04:00+00:00",
+    )
+
+    assert evidence["validated_case_count"] == 2
+    assert evidence["bm1690_validated_case_count"] == 1
+    assert evidence["sg2260e_validated_case_count"] == 2
 
 
 @pytest.mark.parametrize("failure", ("missing", "source", "toolchain", "raw", "numeric"))

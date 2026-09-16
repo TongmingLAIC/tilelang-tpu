@@ -59,7 +59,7 @@ def _make_global_copy(width, dtype="uint8"):
     return global_copy
 
 
-def _make_exp_family_with_large_hw(op_name):
+def _make_exp_with_large_hw():
 
     @T.prim_func
     def exp_family():
@@ -68,23 +68,14 @@ def _make_exp_family_with_large_hw(op_name):
             # Each component is representable by dim4, while h*w is one past
             # the additional tpu_bdc_fp_exp limit.
             out = T.alloc_shared((1, 1, 256, 256), "float16")
-            source = T.alloc_shared((1, 1, 256, 256), "float16")
             work0 = T.alloc_shared((1, 1, 256, 256), "float16")
             work1 = T.alloc_shared((1, 1, 256, 256), "float16")
             coeff = T.alloc_shared((64, 32), "float16")
-            if op_name == "tl.tpukernel.exp":
-                T.evaluate(
-                    T.call_extern("handle", op_name, buffer_to_tile_region(out, "rw"),
-                                  buffer_to_tile_region(work0, "rw"),
-                                  buffer_to_tile_region(work1, "rw"),
-                                  buffer_to_tile_region(coeff, "rw")))
-            else:
-                T.evaluate(
-                    T.call_extern("handle", op_name, buffer_to_tile_region(out, "rw"),
-                                  buffer_to_tile_region(source, "r"),
-                                  buffer_to_tile_region(work0, "rw"),
-                                  buffer_to_tile_region(work1, "rw"),
-                                  buffer_to_tile_region(coeff, "rw")))
+            T.evaluate(
+                T.call_extern("handle", "tl.tpu.exp", buffer_to_tile_region(out, "rw"),
+                              buffer_to_tile_region(work0,
+                                                    "rw"), buffer_to_tile_region(work1, "rw"),
+                              buffer_to_tile_region(coeff, "rw")))
 
     return exp_family
 
@@ -218,10 +209,9 @@ def test_rv_integer_copy_descriptors_preserve_signedness(dtype, dtype_name):
     assert f"PRECISION({dtype_name}), FP8TYPE({dtype_name})" not in source
 
 
-@pytest.mark.parametrize("op_name", ("tl.tpukernel.exp", "tl.tpukernel.sigmoid"))
-def test_exp_family_rejects_h_w_product_above_ppl_limit(op_name):
+def test_exp_rejects_h_w_product_above_ppl_limit():
     with pytest.raises(tvm.error.TVMError, match=r"requires h\*w <= 65535"):
-        _emit_source_without_address_assignment(_make_exp_family_with_large_hw(op_name))
+        _emit_source_without_address_assignment(_make_exp_with_large_hw())
 
 
 @pytest.mark.parametrize("reduce", (T.ppl_reduce_sum, T.ppl_reduce_max))
@@ -356,10 +346,10 @@ def test_native_semantic_ops_validate_source_rank_and_full_shape():
             dst = T.alloc_shared((2, 3, 1, 4), "float32")
             src = T.alloc_shared((1, 3, 2, 4), "float32")
             T.evaluate(
-                T.call_extern("handle", "tl.tpukernel.rsqrt", buffer_to_tile_region(dst, "w"),
+                T.call_extern("handle", "tl.tpu.rsqrt", buffer_to_tile_region(dst, "w"),
                               buffer_to_tile_region(src, "r")))
 
-    with pytest.raises(tvm.error.TVMError, match="matching dst/src shapes"):
+    with pytest.raises(ValueError, match="matching dst/src shapes"):
         tilelang.lower(
             mismatched_rsqrt_shape,
             target=_target(),
@@ -378,7 +368,7 @@ def test_native_semantic_ops_validate_source_rank_and_full_shape():
                               buffer_to_tile_region(rhs, "r"), buffer_to_tile_region(out, "w"),
                               T.bool(False), T.bool(False), 16, 16, 16, T.bool(False)))
 
-    with pytest.raises(tvm.error.TVMError, match="requires rank-2 A"):
+    with pytest.raises(ValueError, match="requires rank-2 A"):
         tilelang.lower(
             rank3_gemm,
             target=_target(),
@@ -401,7 +391,7 @@ def test_native_gemm_rejects_output_storage_alias(programming_model):
                               buffer_to_tile_region(lhs_and_out, "w"), T.bool(False), T.bool(False),
                               16, 16, 16, T.bool(False)))
 
-    with pytest.raises(tvm.error.TVMError, match="output/accumulator C must use storage distinct"):
+    with pytest.raises(ValueError, match="output/accumulator C must use storage distinct"):
         tilelang.lower(
             aliased_gemm,
             target=_target(programming_model),
@@ -420,12 +410,12 @@ def test_native_exp_rejects_transposed_coefficient_shape():
             work1 = T.alloc_shared((4, 32), "float16")
             coeff = T.alloc_shared((32, 64), "float16")
             T.evaluate(
-                T.call_extern("handle", "tl.tpukernel.exp", buffer_to_tile_region(out, "rw"),
+                T.call_extern("handle", "tl.tpu.exp", buffer_to_tile_region(out, "rw"),
                               buffer_to_tile_region(work0,
                                                     "rw"), buffer_to_tile_region(work1, "rw"),
                               buffer_to_tile_region(coeff, "rw")))
 
-    with pytest.raises(tvm.error.TVMError, match="coefficient buffer must have shape"):
+    with pytest.raises(ValueError, match="coefficient buffer must have shape"):
         tilelang.lower(
             malformed_exp_coefficients,
             target=_target(),

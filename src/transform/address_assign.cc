@@ -512,19 +512,18 @@ private:
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);
-    } else if (op_name == "tl.tpukernel.mul_scalar" ||
-               op_name == "tl.tpukernel.add_scalar" ||
-               op_name == "tl.tpukernel.rsqrt") {
+    } else if (op_name == "tl.tpu.mul_scalar" ||
+               op_name == "tl.tpu.add_scalar" || op_name == "tl.tpu.rsqrt") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
-    } else if (op_name == "tl.tpukernel.reduce_sum" ||
-               op_name == "tl.tpukernel.reduce_max") {
+    } else if (op_name == "tl.tpu.reduce_sum" ||
+               op_name == "tl.tpu.reduce_max") {
       // The current pool-based lowering initializes the physically padded
       // tail of the local input tile before reducing it.
       mark_arg(1, BufferAccessKind::kReadWrite);
       mark_arg(2, BufferAccessKind::kWrite);
       mark_arg(3, BufferAccessKind::kReadWrite);
-    } else if (op_name == "tl.tpukernel.exp") {
+    } else if (op_name == "tl.tpu.exp") {
       // exp lowers to a multi-instruction composite.  Its output, both
       // workspaces, and coefficient tensor are read and written at different
       // points inside that opaque sequence, so model them as one conservative
@@ -532,14 +531,8 @@ private:
       for (size_t i = 1; i <= 4; ++i) {
         mark_arg(i, BufferAccessKind::kConservative);
       }
-    } else if (op_name == "tl.tpukernel.sigmoid") {
-      // The PPL 1.7 sigmoid composition reuses dst/workspaces across exp,
-      // reciprocal, and add instructions.  Keep every operand distinct at
-      // the bank-planning boundary.
-      for (size_t i = 1; i <= 5; ++i) {
-        mark_arg(i, BufferAccessKind::kConservative);
-      }
-    } else if (op_name == "tl.tpukernel.gather") {
+    } else if (op_name == "tl.tpukernel.gather" ||
+               op_name == "tl.tpu.embedding") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);
@@ -547,12 +540,6 @@ private:
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kWrite);
       mark_arg(3, BufferAccessKind::kRead);
-    } else if (op_name == "tl.tpukernel.rope_add") {
-      mark_arg(1, BufferAccessKind::kWrite);
-      mark_arg(2, BufferAccessKind::kRead);
-      mark_arg(3, BufferAccessKind::kRead);
-      mark_arg(4, BufferAccessKind::kRead);
-      mark_arg(5, BufferAccessKind::kRead);
     } else {
       // Unknown/non-TPU externs have no instruction contract in this pass.
       // Keep their buffer operands conservative; the residual-IR verifier or
@@ -710,7 +697,10 @@ PrimFunc InferAddress(PrimFunc f) {
                      << " would alias string-keyed LMEM metadata";
     TensorLive live;
     live.tensor_size =
-        tpuv7::TpuAlignSizeBytes(op->shape, op->dtype, "AddressAssign");
+        storage_scope == "local.matrix"
+            ? tpuv7::TpuMatrixSizeBytes(op->shape, op->dtype,
+                                        "AddressAssign matrix")
+            : tpuv7::TpuAlignSizeBytes(op->shape, op->dtype, "AddressAssign");
     live_ranges[op] = live;
   }
   BufferUseCollector(alloc_ops, &live_ranges, &bank_conflict_map)

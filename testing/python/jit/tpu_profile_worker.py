@@ -26,6 +26,10 @@ _COPY_CASES = {
     "copy-fp16-local-roundtrip": ("float16", "local"),
     "copy-fp16-global-to-global": ("float16", "global"),
 }
+_CONVERSION_CASES = {
+    "copy-fp16-to-bf16": ("float16", "bfloat16"),
+    "copy-bf16-to-fp16": ("bfloat16", "float16"),
+}
 
 _MAX_CASES = {
     "elementwise-max-fp16-dense": ("float16", "dense"),
@@ -40,6 +44,10 @@ _MAX_CASES = {
 _BROADCAST_CASES = {
     f"elementwise-{operation}-{dtype}-broadcast": (operation, dtype)
     for operation in ("add", "sub", "mul", "div") for dtype in ("fp16", "bf16", "fp32")
+}
+_FP32_TRANSPOSE_A_CASES = {
+    "matmul-fp32-transpose-a-overwrite": False,
+    "matmul-fp32-transpose-a-accumulate": True,
 }
 
 
@@ -140,6 +148,38 @@ _COPY_PROGRAMS = {
 }
 
 
+@T.prim_func
+def _copy_fp16_to_bf16_program(
+        source: T.Tensor((4, 32), "float16"),
+        destination: T.Tensor((4, 32), "bfloat16"),
+):
+    with T.Kernel(1, is_cpu=True):
+        source_local = T.alloc_shared((4, 32), "float16")
+        destination_local = T.alloc_shared((4, 32), "bfloat16")
+        T.ppl_copy(source, source_local)
+        T.ppl_copy(source_local, destination_local)
+        T.ppl_copy(destination_local, destination)
+
+
+@T.prim_func
+def _copy_bf16_to_fp16_program(
+        source: T.Tensor((4, 32), "bfloat16"),
+        destination: T.Tensor((4, 32), "float16"),
+):
+    with T.Kernel(1, is_cpu=True):
+        source_local = T.alloc_shared((4, 32), "bfloat16")
+        destination_local = T.alloc_shared((4, 32), "float16")
+        T.ppl_copy(source, source_local)
+        T.ppl_copy(source_local, destination_local)
+        T.ppl_copy(destination_local, destination)
+
+
+_CONVERSION_PROGRAMS = {
+    ("float16", "bfloat16"): _copy_fp16_to_bf16_program,
+    ("bfloat16", "float16"): _copy_bf16_to_fp16_program,
+}
+
+
 def _matmul(chip: str, programming_model: str, runtime_mode: str) -> None:
 
     @T.prim_func
@@ -181,6 +221,47 @@ def _matmul(chip: str, programming_model: str, runtime_mode: str) -> None:
     if not torch.allclose(c, reference, atol=1e-2, rtol=1e-2):
         difference = float(torch.max(torch.abs(reference - c)))
         raise RuntimeError(f"{programming_model} matmul mismatch; max abs difference={difference}")
+
+
+def _matmul_fp32_transpose_a(accumulate: bool, chip: str, programming_model: str,
+                             runtime_mode: str) -> None:
+    m, n, k = 16, 16, 32
+
+    @T.prim_func
+    def matmul(
+            A: T.Tensor((k, m), "float32"),
+            B: T.Tensor((k, n), "float32"),
+            C: T.Tensor((m, n), "float32"),
+    ):
+        with T.Kernel(1, is_cpu=True):
+            A_local = T.alloc_shared((k, m), "float32", scope="local.matrix")
+            B_local = T.alloc_shared((k, n), "float32", scope="local.matrix")
+            C_local = T.alloc_shared((m, n), "float32", scope="local.matrix")
+            T.ppl_copy(A, A_local)
+            T.ppl_copy(B, B_local)
+            if accumulate:
+                T.ppl_copy(C, C_local)
+            T.ppl_gemm(A_local, B_local, C_local, transpose_A=True, accumulate=accumulate)
+            T.ppl_copy(C_local, C)
+
+    generator = torch.Generator().manual_seed(17 if accumulate else 13)
+    a = torch.randn((k, m), generator=generator, dtype=torch.float32) * 0.25
+    b = torch.randn((k, n), generator=generator, dtype=torch.float32) * 0.25
+    initial = 0.5 if accumulate else 0.0
+    c = torch.full((m, n), initial, dtype=torch.float32)
+    kernel = tilelang.compile(
+        matmul,
+        out_idx=-1,
+        target=(f"tpu -mcpu={chip} "
+                f"-tpu-programming-model={programming_model}"),
+        runtime_mode=runtime_mode,
+    )
+    kernel(a, b, c)
+    reference = torch.matmul(a.transpose(0, 1), b) + initial
+    if not torch.allclose(c, reference, atol=5e-5, rtol=5e-5):
+        difference = float(torch.max(torch.abs(reference - c)))
+        raise RuntimeError(f"{programming_model} FP32 transpose-A matmul mismatch; "
+                           f"accumulate={accumulate}; max abs difference={difference}")
 
 
 def _elementwise(operation: str,
@@ -325,6 +406,32 @@ def _copy(dtype: str, transfer: str, chip: str, programming_model: str, runtime_
                            f"mismatch; unequal elements={mismatches}")
 
 
+def _copy_conversion(source_dtype: str, destination_dtype: str, chip: str, programming_model: str,
+                     runtime_mode: str) -> None:
+    shape = (4, 32)
+    torch_dtypes = {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }
+    source = torch.linspace(
+        -3.0, 3.0, shape[0] * shape[1],
+        dtype=torch.float32).reshape(shape).to(torch_dtypes[source_dtype])
+    destination = torch.zeros(shape, dtype=torch_dtypes[destination_dtype])
+    kernel = tilelang.compile(
+        _CONVERSION_PROGRAMS[(source_dtype, destination_dtype)],
+        out_idx=-1,
+        target=(f"tpu -mcpu={chip} "
+                f"-tpu-programming-model={programming_model}"),
+        runtime_mode=runtime_mode,
+    )
+    kernel(source, destination)
+    expected = source.to(torch_dtypes[destination_dtype])
+    if not torch.equal(destination.view(torch.int16), expected.view(torch.int16)):
+        difference = float(torch.max(torch.abs(destination.float() - expected.float())))
+        raise RuntimeError(f"{programming_model} {source_dtype}-to-{destination_dtype} conversion "
+                           f"mismatch; max abs difference={difference}")
+
+
 def _rv_control(chip: str, programming_model: str, runtime_mode: str) -> None:
     if programming_model != "rv":
         raise RuntimeError("rv-control requires programming_model='rv'.")
@@ -352,6 +459,7 @@ def main() -> None:
         choices=(
             "matmul",
             "tpukernel-matmul",
+            *_FP32_TRANSPOSE_A_CASES,
             "elementwise-add",
             "elementwise-sub",
             "elementwise-mul",
@@ -359,6 +467,7 @@ def main() -> None:
             *_BROADCAST_CASES,
             *_MAX_CASES,
             *_COPY_CASES,
+            *_CONVERSION_CASES,
             "rv-control",
         ),
         required=True,
@@ -371,6 +480,9 @@ def main() -> None:
         chip, programming_model, runtime_mode = _profile_selection()
         if args.case in ("matmul", "tpukernel-matmul"):
             _matmul(chip, programming_model, runtime_mode)
+        elif args.case in _FP32_TRANSPOSE_A_CASES:
+            _matmul_fp32_transpose_a(_FP32_TRANSPOSE_A_CASES[args.case], chip, programming_model,
+                                     runtime_mode)
         elif args.case in _MAX_CASES:
             dtype, variant = _MAX_CASES[args.case]
             _elementwise("max", chip, programming_model, runtime_mode, dtype=dtype, variant=variant)
@@ -384,6 +496,9 @@ def main() -> None:
         elif args.case in _COPY_CASES:
             dtype, transfer = _COPY_CASES[args.case]
             _copy(dtype, transfer, chip, programming_model, runtime_mode)
+        elif args.case in _CONVERSION_CASES:
+            source_dtype, destination_dtype = _CONVERSION_CASES[args.case]
+            _copy_conversion(source_dtype, destination_dtype, chip, programming_model, runtime_mode)
         else:
             _rv_control(chip, programming_model, runtime_mode)
     except BaseException as error:

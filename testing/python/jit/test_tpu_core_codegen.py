@@ -259,7 +259,7 @@ def test_topk_capability_is_chip_specific_and_fails_before_runtime():
     ).kernel_source
     assert "tpu_hau_sort_natural_index(" in bm1690_source
 
-    with pytest.raises(tvm.error.TVMError, match="unavailable on SG2260E"):
+    with pytest.raises(ValueError, match="unavailable on SG2260E"):
         tilelang.lower(
             _tpukernel_topk,
             target=_tpu_target("sg2260e", "tpukernel"),
@@ -366,32 +366,30 @@ def test_portable_copy_cases_select_the_expected_instruction_path(dtype, transfe
         assert "tpu_gdma_cpy_" not in source
 
 
-def test_copy_conversion_capabilities_fail_closed():
-    with pytest.raises(tvm.error.TVMError, match=r"limited to the validated FP32 <-> .* pairs"):
-        tilelang.lower(
-            _local_fp16_to_bf16_copy,
-            target=_tpu_target("sg2260e", "tpukernel"),
-            runtime_mode="cmodel",
-        )
-
-    with pytest.raises(tvm.error.TVMError, match=r"limited to the validated FP32 <-> .* pairs"):
-        tilelang.lower(
-            _local_integer_convert,
-            target=_tpu_target("sg2260e", "tpukernel"),
-            runtime_mode="cmodel",
-        )
-
-    rv_source = tilelang.lower(
+@pytest.mark.parametrize(
+    ("chip", "programming_model", "instruction"),
+    (("bm1690", "tpukernel", "tpu_bdc_cast("), ("sg2260e", "tpukernel", "tpu_bdc_cast("),
+     ("sg2260e", "rv", "rvt_cvt_f2f(9, 8)")),
+)
+def test_fp16_to_bf16_copy_conversion_selects_validated_backend(chip, programming_model,
+                                                                instruction):
+    source = tilelang.lower(
         _local_fp16_to_bf16_copy,
-        target=_tpu_target("sg2260e", "rv"),
+        target=_tpu_target(chip, programming_model),
         runtime_mode="cmodel",
     ).kernel_source
-    assert "rvt_cvt_f2f(9, 8)" in rv_source
+    assert instruction in source
 
-    with pytest.raises(tvm.error.TVMError, match="rvt_cvt_f2f only accepts"):
+
+@pytest.mark.parametrize("programming_model", ("tpukernel", "rv"))
+def test_integer_copy_conversion_capabilities_fail_closed(programming_model):
+    diagnostic = ("requires floating-point operands"
+                  if programming_model == "tpukernel" else "rvt_cvt_f2f only accepts")
+
+    with pytest.raises(tvm.error.TVMError, match=diagnostic):
         tilelang.lower(
             _local_integer_convert,
-            target=_tpu_target("sg2260e", "rv"),
+            target=_tpu_target("sg2260e", programming_model),
             runtime_mode="cmodel",
         )
 

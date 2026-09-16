@@ -1,278 +1,150 @@
 # TileLang-TPU Backend Design
 
-This document describes the compiler architecture for BM1690 and SG2260E,
-including target selection, pass boundaries, operation semantics, instruction
-selection, memory effects, and runtime integration.
+This document summarizes the maintained compiler architecture for BM1690 and
+SG2260E. Public operation and dtype details are defined in
+[the operator mapping](../../tpu_demo/OP_MAPPING.md); runnable model operators
+and validation commands are documented in
+[the TPU demo guide](../../tpu_demo/README.md).
 
-## 1. Design overview
+## Target model
 
-The backend separates three independent choices:
+TPU compilation makes three explicit choices:
 
-| Axis | Values | Controls |
+| Axis | Values | Responsibility |
 | --- | --- | --- |
-| Chip | `bm1690`, `sg2260e` | PPL architecture, compile definitions, physical cores, and chip features |
+| Chip | `bm1690`, `sg2260e` | Architecture, physical core count, and chip features |
 | Programming model | `tpukernel`, `rv` | Device ABI, descriptors, instructions, and kernel lifecycle |
-| Runtime mode | `cmodel`, `pcie` | Host runtime, linking, loading, and device access |
+| Runtime mode | `cmodel`, `pcie` | Simulator or physical-board execution |
 
-The chip and programming model form the compile target. The runtime mode only
-selects how the compiled device program runs.
+Supported target pairs are BM1690 with TPU-Kernel, SG2260E with TPU-Kernel,
+and SG2260E with RV Tensor. Runtime mode does not change instruction
+selection.
 
 ```python
 kernel = tilelang.compile(
     program,
-    target="tpu -mcpu=sg2260e -tpu-programming-model=tpukernel",
+    target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
     runtime_mode="cmodel",
 )
 ```
 
-The valid compile targets are:
+## Semantic boundary
 
-- BM1690 with TPU-Kernel
-- SG2260E with TPU-Kernel
-- SG2260E with RV Tensor
+Portable public helpers emit a backend-neutral `tl.tpu.*` ABI:
 
-BM1690 and SG2260E share the TPUv7 local-memory geometry used by the allocator.
-They differ in PPL architecture, compile definitions, physical core count, and
-RV availability. BM1690 has eight physical cores; SG2260E has four. Current
-kernels launch on one logical core, so the topology model does not yet provide
-multi-core partitioning.
+- Copy, fill, and GEMM
+- Tensor add, subtract, multiply, divide, and maximum
+- Scalar add and multiply
+- Exp and reciprocal square root
+- Sum and maximum reductions
+- Embedding row lookup
 
-## 2. Target configuration
+Target-bound code generation selects TPU-Kernel or RV Tensor instructions.
+Backend-specific `tl.tpukernel.*` semantics are reserved for gather and top-k,
+which have no portable RV contract. Raw `rvt_*` calls remain an expert
+interface and cannot be mixed with compiler-managed semantics in one kernel.
 
-The read-only `TPU_CHIP_SPECS` table in `tilelang/engine/tpu_config.py` is the
-Python source of chip capabilities:
+RMSNorm, split-K RMSNorm, RoPE, SwiGLU, and FlashAttention are expressed in
+`tpu_demo/` as compositions of the independent public primitives. There is no
+backend semantic for a fused sigmoid or fused RoPE update.
 
-- BM1690 maps to `tpub_7_1`, has eight cores, and accepts `tpukernel`.
-- SG2260E maps to `tpub_7_1_e`, has four cores, and accepts `tpukernel` and
-  `rv`.
-
-`TPUTargetSpec(chip, programming_model)` is created from a complete TVM target.
-`TPURuntimeConfig(runtime_mode)` is created separately and defaults to CModel.
-The PPL resolver, JIT adapter, and profiler consume these objects instead of
-inferring configuration from directories or environment variables.
-
-Compilation rejects a bare `target="tpu"`, a missing target option, an unknown
-value, and BM1690 with RV Tensor. The native build entry repeats the target
-check so direct FFI callers cannot bypass the Python boundary.
-
-## 3. Compilation pipeline
+## Compilation pipeline
 
 ```text
 TileLang frontend
-  |
-  +-- T.ppl_{copy,fill,gemm,add,subtract,mul,div,max}
-  |      `-- tl.tpu.*                    portable TPU semantics
-  |
-  `-- T.ppl_{scalar,exp,...,rope}
-         `-- tl.tpukernel.*              TPU-Kernel-only semantics
-                    |
-                    v
-          target and module checks
-                    |
-          BindTarget and frontend lowering
-                    |
-          conservative TPU pass pipeline
-                    |
-          second module check
-                    |
-          AddressAssign for TPUv7 LMEM
-                    |
-          target.build.tilelang_tpu
-                    |
-          codegen_tpu.{h,cc}
-          +-- codegen_tpukernel.cc --> tpu_kernel.h
-          `-- codegen_rv.cc        --> rvt_api.h
-                    |
-              PPL 1.7 build
-          +-- CModel runtime
-          `-- installed PCIe runtime
+       |
+       v
+typed tl.tpu.* / tl.tpukernel.* semantics
+       |
+       v
+target and residual-IR validation
+       |
+       v
+frontend lowering and conservative TPU passes
+       |
+       v
+TPUv7 local-memory address assignment
+       |
+       v
+target.build.tilelang_tpu
+       |
+       +-- TPU-Kernel instruction selector
+       |
+       `-- RV Tensor instruction selector
+       |
+       v
+CModel or PCIe runtime
 ```
 
-`target.build.tilelang_tpu` is the only TPU build entry. A TPU module contains
-one `PrimFunc`, and reserved host entry names cannot be used as device kernel
-names.
+The semantic registry is closed. Adding an operation requires a public helper,
+typed region arguments, memory effects, target validation, both applicable
+instruction selectors, and positive/negative tests. Unknown externs and
+residual vector operations fail before native compilation.
 
-The source files follow standard TVM target-codegen naming:
+## Tensor descriptors and memory effects
 
-- `codegen_tpu.{h,cc}` implements the shared TPU source generator, semantic
-  parsing, and programming-model dispatch.
-- `codegen_tpukernel.cc` implements TPU-Kernel instruction selection.
-- `codegen_rv.cc` implements RV Tensor instruction selection.
+Global kernel parameters and compiler-owned local allocations receive
+canonical descriptors containing shape, stride, address, dtype, and layout
+information. Public operations accept ranks and layouts that their instruction
+mapping can represent; shape-changing aliases, unbounded regions, and
+unsupported partial local-channel views are rejected.
 
-The two instruction files are parts of one source generator, not separate
-compiler backends. Shared checks therefore remain in one place without hiding
-programming-model-specific ABI details.
+Address assignment uses explicit effects:
 
-### Pass policy
+- Copy reads the source and writes the destination.
+- Fill writes the destination.
+- GEMM reads A/B and writes C, or reads and writes C when accumulating.
+- Binary and scalar math write the output and read their inputs.
+- Reduction input/scratch storage is conservative because TPU-Kernel may
+  initialize physically padded elements.
+- Exp workspaces are conservative across its multi-instruction sequence.
+- Embedding/gather and top-k have explicit value/index roles.
 
-The TPU pipeline uses transformations whose residual IR and memory effects are
-defined for the TPU source generator: target binding, frontend lowering,
-simplification, conditional binding, allocation placement, conditional merge,
-opaque-block lowering, narrowing, unrolling, and final simplification.
+Loop-carried allocations remain live across a loop back edge. The allocator
+does not rely on operation names to guess effects.
 
-The following generic GPU transformations remain disabled:
+## Instruction selection
 
-- Vector legalization and vectorization, because residual vector lanes,
-  `Ramp`, and vector loads and stores do not yet have complete TPU semantics
-- Software-pipeline planning and injection, because DMA/compute tokens, buffer
-  versions, and hazards are not modeled
-- `StorageRewrite`, because it removes the structured `DeclBuffer` and
-  `Allocate` relationship required by TPU code generation
+The two selectors share frontend semantics but not descriptors or device
+calls. TPU-Kernel uses GDMA/BDC/HAU APIs. RV Tensor builds CR/TR/GR descriptors,
+configures instruction state, and emits RV commands. Neither selector falls
+back to the other programming model.
 
-The module contract is checked before and after the target passes. It rejects
-residual vector IR, GPU barriers, unknown extern calls, mixed programming
-models, unsupported loop kinds, direct buffer loads and stores, conditional
-allocations, unconsumed attributes, prefetch nodes, and raw custom source.
+The authoritative mapping tables cover:
 
-The only structured `BufferLoad` and `Ramp` exception is the contiguous region
-marker used by `tl.tpu.copy`. Its ramp must have unit stride and a lane count
-equal to the explicit region extent.
+- Floating and integer copies, local float conversion, and FP32 matrix copies
+- FP8/base floating fill and arithmetic capability
+- GEMM dtype, output, layout, transpose, and accumulation combinations
+- Exp, rsqrt, reduction, embedding, gather, and top-k restrictions
 
-## 4. Semantic ABI
+See [OP_MAPPING.md](../../tpu_demo/OP_MAPPING.md) rather than duplicating those
+tables here.
 
-| Layer | Namespace | Responsibility |
-| --- | --- | --- |
-| Public frontend | `T.ppl_*` | User-facing TileLang operations and static shape/type checks |
-| Portable TPU semantics | `tl.tpu.*` | Operations that can select TPU-Kernel or RV Tensor |
-| TPU-Kernel semantics | `tl.tpukernel.*` | Operations available only through TPU-Kernel |
-| Low-level RV ABI | isolated `rvt_*` calls | User-managed descriptors and lifecycle |
+## Runtime and validation
 
-The legacy `ppl.*` and raw `tpu_*` TIR extern interfaces are not accepted. Raw
-RV calls remain available for expert kernels but cannot be mixed with
-compiler-managed TPU operations.
+CModel and PCIe use the same compile target. Validation proceeds serially:
 
-Every typed TPU buffer operand crosses the semantic boundary as
-`tl.region(BufferLoad, access_mask, logical_extents)`. Non-copy operations
-require a zero-based region covering the complete logical buffer. Copy accepts
-an explicit subregion after proving its bounds and continuity.
+1. BM1690 TPU-Kernel CModel.
+2. SG2260E TPU-Kernel and RV Tensor CModel.
+3. SG2260E TPU-Kernel and RV Tensor PCIe.
 
-Native code generation checks the buffer's data variable, type, original rank,
-normalized shape, scope, and allocation owner against the compiler-owned
-descriptor. A presentation alias is allowed only when it leaves the descriptor
-unchanged and does not introduce another allocation owner.
+The PCIe runners require matching successful CModel summaries, take an
+exclusive device lock, and check that the board returns to `Active` and idle.
+Every numerical worker performs one compile and one launch in an isolated
+process. Profiling records are conformance diagnostics, not performance
+benchmarks.
 
-Local TPU scopes are `shared`, `shared.dyn`, `local`, and `local.fragment`.
-Every normalized N/C/H/W extent must be a compile-time integer in
-`[1, 65535]`. Operation-specific derived dimensions, such as aligned reduction
-widths, must fit the same descriptor fields.
+## Current boundaries
 
-## 5. Portable operation mapping
+- Demo tiles require positive static dimensions and exact divisibility.
+- Public binary broadcast is limited to an equal RHS or `(M, 1)` W broadcast.
+- Reductions are rank-2, overwrite their output, and support only `dim=1`.
+- FP32 matrix operands require `local.matrix` and widths divisible by 16.
+- Kernels currently use one logical core; multicore partitioning is separate
+  future work.
+- Asynchronous software-pipeline scheduling remains disabled until TPU command
+  dependencies and hazards have a complete compiler model.
 
-| Semantic operation | TPU-Kernel | RV Tensor | Main contract |
-| --- | --- | --- | --- |
-| `tl.tpu.copy` | GDMA S2L/L2S/S2S and BDC L2L/cast | RV DMA load/store/copy and limited f2f cast | Equal static extents; cross-type conversion is local only |
-| `tl.tpu.fill` | `tpu_bdc_set_C` | Typed CR followed by `rvt_cp` | RV accepts zero only |
-| `tl.tpu.gemm` | FP and FP8 matrix families | `rvt_fmm2[a]_{nn,nt}` | Rank-2 local tensors; no transpose-A; explicit overwrite or accumulation |
-| `tl.tpu.add/sub/mul/div/max` | `tpu_bdc_fp_*` and `tpu_bdc_max` | `rvt_f*` | Matching local types; equal shape or right-hand W broadcast |
-
-GEMM's `accumulate` attribute controls both numerical behavior and memory
-effects. The output is write-only in overwrite mode and read-write in
-accumulation mode. Accumulation requires FP32 output. Non-FP8 overwrite accepts
-an output matching the inputs or FP32. FP8 GEMM uses matching FP8 inputs and an
-FP32 output.
-
-RV GEMM currently accepts FP16 or BF16 inputs. RV elementwise operations accept
-FP16, BF16, and FP32. RV W broadcast uses a zero-stride free-layout descriptor,
-not a local-memory expansion.
-
-Unsupported types, shapes, layouts, aliases, tails, and attributes produce a
-compile-time error. Code generation does not fall back to another programming
-model.
-
-## 6. TPU-Kernel-only operations
-
-| Operation | Implementation | Data types |
-| --- | --- | --- |
-| Scalar add/multiply | FP32 constant cast followed by `tpu_bdc_fp_add_C` or `tpu_bdc_fp_mul_C` | FP16, BF16, FP32, E4M3, E5M2 |
-| Exp | Coefficient load and `tpu_bdc_fp_exp` | FP16, BF16, FP32 |
-| Sigmoid | Negation, exp, reciprocal, and add composite | FP16, BF16, FP32 |
-| Reduce sum/max | Padding and two-stage pooling composite on axis 1 | FP16, BF16, FP32 |
-| Rsqrt | `tpu_bdc_fp_rsqrt` | FP16, BF16, FP32 |
-| Gather | `tpu_gdma_h_gather_S2S` with UINT32 index | FP16, BF16, FP32, E4M3, E5M2 payload |
-| Top-k | `tpu_hau_sort_natural_index` | BM1690 FP32, INT32, and UINT32 |
-| RoPE primitive | Two interleaved floating-point add operations | FP16, BF16, FP32, E4M3, E5M2 |
-
-Top-k is available on BM1690 and rejected for SG2260E. It writes K values and
-K indices; equal values retain ascending source-index order.
-
-The high-level RMSNorm, split-K RMSNorm, RoPE, SwiGLU, and FlashAttention
-examples depend on these TPU-Kernel-only operations. Elementwise arithmetic and
-matmul use portable semantics and can select RV Tensor on SG2260E.
-
-## 7. FP8 contract
-
-TPU-Kernel exposes E4M3 and E5M2 only for registered operation and attribute
-combinations. The current contract includes:
-
-- Same-format local and S2S copy
-- Zero fill and conversion to and from FP32
-- Equal-shape and W-broadcast add, subtract, multiply, and max
-- Scalar add and multiply with the default non-saturating behavior
-- Gather with UINT32 indices
-- Interleaved even/odd RoPE add
-- NN and NT GEMM variants with FP32 output
-
-FP8 divide, nonzero fill, other conversions, FP8 GEMM output, and FP8
-exp/sigmoid/rsqrt/reduction/top-k are not part of the contract. RV FP8 mappings
-are also disabled.
-
-FP8 scalar operations first convert the FP32 constant with
-`RM_HALF_TO_EVEN`, then call the standard same-format scalar instruction. The
-current non-saturating behavior produces NaN on E4M3 overflow and infinity on
-E5M2 overflow; the public API does not expose a saturation option.
-
-## 8. Address assignment and effects
-
-`AddressAssign` uses a closed operation registry rather than guessing effects
-from function names:
-
-- Copy reads its source and writes its destination.
-- Fill writes its destination.
-- GEMM reads A and B; C is written or read-written according to `accumulate`.
-- Binary, scalar, rsqrt, and RoPE operations write outputs and read inputs.
-- Reduction workspaces are modeled conservatively as read-write.
-- Exp and sigmoid workspaces retain conservative conflict relationships.
-- Gather and top-k assign explicit value and index roles.
-
-Loop liveness includes the back edge. A local buffer allocated outside a
-repeating `For` or `While` remains live across the loop when used inside it.
-Static zero- or one-trip loops have no back edge, and loop-local allocations
-keep their local lifetime.
-
-Unknown semantic operations never receive optimistic effects. Incomplete
-shape, type, scope, layout, target, or lifecycle information stops compilation
-at the first stage that can identify the error.
-
-## 9. PPL, runtime, and profiling
-
-The toolchain accepts the PPL 1.7 `deps/` release layout. Base compilation,
-CModel, PCIe, RV headers, and profiling dependencies are checked separately.
-CModel uses the SDK runtime. PCIe uses the installed TPUv7 board runtime and
-the SDK's headers, chip libraries, cross-compiler, and firmware.
-
-Profiling reuses PPL and TPUDNN recording formats without running the PPL
-autotuning pipeline. CModel captures raw command records and can use a
-configured PerfAI decoder. PCIe wraps one launch in a TPUDNN recorder and can
-decode it through an explicitly configured `bigTpuProfile` environment.
-
-Numerical checks and profiling are independent. A recorded single launch is
-appropriate for instruction inspection, not for throughput or latency
-benchmarking. The detailed design is in
-[`../ppl-profiling/README.md`](../ppl-profiling/README.md).
-
-## 10. Extension rules
-
-Each new operation or target capability must define:
-
-1. Public semantics and a typed TIR representation
-2. Operand roles, memory effects, alias rules, and workspace ownership
-3. Supported chip, programming model, type, shape, layout, and attributes
-4. Instruction selection and synchronization requirements
-5. Positive and negative source tests
-6. CModel numerical cases before PCIe cases
-7. A machine-readable contract entry with exact evidence references
-
-Raw SDK symbols or successful compilation alone do not establish an operation
-contract. See [`test-report.md`](test-report.md) for runtime results and
-[`../tpu-op-contract/README.md`](../tpu-op-contract/README.md) for the contract
-format.
+New capabilities should state their frontend semantics, supported targets and
+dtypes, instruction selection, failure behavior, and CModel result before
+physical-board validation.

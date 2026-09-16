@@ -156,8 +156,7 @@ def test_typed_semantic_regions_are_markers_but_bare_access_ptr_is_removed():
         return tir.call_intrin("handle", tir.op.Op.get("tl.region"), tir.BufferLoad(buffer, [0]),
                                access_mask, 8)
 
-    rsqrt = tir.call_extern("handle", "tl.tpukernel.rsqrt", region(destination, 2),
-                            region(source, 1))
+    rsqrt = tir.call_extern("handle", "tl.tpu.rsqrt", region(destination, 2), region(source, 1))
     function = tir.PrimFunc(
         [source.data, destination.data],
         tir.Evaluate(rsqrt),
@@ -241,7 +240,7 @@ def test_tpu_residual_ir_rejects_pure_externs():
 
 def test_tpu_residual_ir_allows_only_owned_semantic_and_model_raw_externs():
     tpukernel = _prim_func(
-        tir.Evaluate(tir.call_extern("handle", "tl.tpukernel.rsqrt")), "owned_tpukernel")
+        tir.Evaluate(tir.call_extern("handle", "tl.tpu.rsqrt")), "owned_tpukernel")
     lower_module.validate_target_module_contract(
         tvm.IRModule({"owned_tpukernel": tpukernel}), _target("tpukernel"))
 

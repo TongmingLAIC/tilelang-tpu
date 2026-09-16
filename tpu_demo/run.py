@@ -46,7 +46,7 @@ def run_case(case_id: str,
         return run(**common)
     if case.operation == "flashattn":
         from tpu_demo.flashattn import run
-        return run(variant=case.variant, **common)
+        return run(variant=case.variant, is_causal=case.is_causal, **common)
     raise AssertionError(f"unhandled registered operation {case.operation!r}")
 
 
