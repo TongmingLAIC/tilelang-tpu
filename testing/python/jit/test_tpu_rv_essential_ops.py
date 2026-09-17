@@ -227,6 +227,10 @@ def run_demo(case, runtime, output_dir):
         args.append(up)
         expected = x.float() * torch.sigmoid(x.float()) * up.float()
     else:
+        # Both RMSNorm demos expose the learned weight as a second input.
+        # Unit weights isolate the normalization path exercised by this
+        # essential-op regression.
+        args.append(torch.ones_like(x))
         expected = x.float() * torch.rsqrt(x.float().square().mean(1, keepdim=True) + 1e-12)
     tilelang.disable_cache()
     compiled = tilelang.compile(
