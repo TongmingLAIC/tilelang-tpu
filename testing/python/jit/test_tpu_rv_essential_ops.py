@@ -17,13 +17,13 @@ import tilelang.language as T
 
 TARGET = "tpu -mcpu=sg2260e -tpu-programming-model=rv"
 DTYPES = ("float16", "bfloat16", "float32")
-CASES = tuple(f"{op}.{dtype}" for op in ("fill", "scalar", "rsqrt", "sum", "max")
-              for dtype in DTYPES) + ("sum-wide.float32", "max-wide.float32", "exp.float32",
-                                      "exp-extremes.float32", "sigmoid.float32", "rmsnorm.float32",
-                                      "softmax.float32", "swiglu.float32") + tuple(
-                                          f"{op}.{dtype}"
-                                          for op in ("demo-rmsnorm", "demo-splitk", "demo-swiglu")
-                                          for dtype in DTYPES)
+CASES = tuple(
+    f"{op}.{dtype}" for op in ("fill", "scalar", "rsqrt", "sum", "max") for dtype in DTYPES) + (
+        "sum-wide.float32", "max-wide.float32", "exp.float32", "sum-unit.float32",
+        "max-unit.float32", "sum-large.float32", "max-large.float32", "exp-extremes.float32",
+        "sigmoid.float32", "rmsnorm.float32", "softmax.float32", "swiglu.float32") + tuple(
+            f"{op}.{dtype}" for op in ("demo-rmsnorm", "demo-splitk", "demo-swiglu")
+            for dtype in DTYPES)
 
 
 def make_kernel(operation, dtype="float32", rows=65, width=33):
@@ -36,7 +36,7 @@ def make_kernel(operation, dtype="float32", rows=65, width=33):
             "demo-swiglu": build_swiglu
         }[operation](
             dtype=dtype)
-    reduce = operation in ("sum", "max", "sum-wide", "max-wide")
+    reduce = operation.startswith(("sum", "max"))
     out_width = 1 if reduce else width
 
     @T.prim_func
@@ -56,11 +56,11 @@ def make_kernel(operation, dtype="float32", rows=65, width=33):
             elif operation == "rsqrt":
                 T.ppl_rsqrt(y, x)
                 T.ppl_copy(y, O)
-            elif operation in ("sum", "max", "sum-wide", "max-wide"):
+            elif operation.startswith(("sum", "max")):
                 r = T.alloc_shared((rows, 1), dtype)
                 # The public max contract overwrites this positive sentinel.
                 T.ppl_fill(r, T.float32(42.0))
-                if operation in ("sum", "sum-wide"):
+                if operation.startswith("sum"):
                     T.ppl_reduce_sum(x, r, dim=1)
                 else:
                     T.ppl_reduce_max(x, r, dim=1)
@@ -133,7 +133,12 @@ def run_case(case, runtime, output_dir):
     op, dtype = case.split(".")
     if op.startswith("demo-"):
         return run_demo(case, runtime, output_dir)
-    rows, width = 65, (65 if "wide" in op else 33)
+    if op.endswith("-unit"):
+        rows, width = 65, 1
+    elif op.endswith("-large"):
+        rows, width = 4, 4096
+    else:
+        rows, width = 65, (65 if "wide" in op else 33)
     torch.manual_seed(17)
     x = (torch.arange(rows * width).reshape(rows, width) % 17 - 8).float() / 4
     if op == "rsqrt":

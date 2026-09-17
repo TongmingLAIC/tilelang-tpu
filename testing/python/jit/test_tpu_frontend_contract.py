@@ -504,7 +504,7 @@ def test_unvalidated_fp8_operations_fail_at_frontend(operation):
     (
         ("bm1690", "tpukernel", "tpu_bdc_fp_max_pool2d("),
         ("sg2260e", "tpukernel", "tpu_bdc_fp_max_pool2d("),
-        ("sg2260e", "rv", "rvt_fmax(10, 10, 8);"),
+        ("sg2260e", "rv", "rvt_pool_fmax(10, 8);"),
     ),
 )
 @pytest.mark.parametrize("dtype", ("e4m3_float8", "e5m2_float8"))
@@ -525,6 +525,36 @@ def test_fp8_reduce_max_selects_validated_backend(chip, programming_model, instr
     assert instruction in source
 
 
+@pytest.mark.parametrize(
+    ("reduction", "instruction"),
+    (
+        (T.ppl_reduce_sum, "rvt_pool_favg(10, 8, 1, 0);"),
+        (T.ppl_reduce_max, "rvt_pool_fmax(10, 8);"),
+    ),
+)
+@pytest.mark.parametrize("dtype", ("e4m3_float8", "e5m2_float8", "float16", "bfloat16", "float32"))
+@pytest.mark.parametrize("width", (1, 65, 4096))
+def test_rv_reduction_uses_one_pooling_instruction(reduction, instruction, dtype, width):
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, is_cpu=True) as _:
+            source = T.alloc_shared((4, width), dtype)
+            output = T.alloc_shared((4, 1), dtype)
+            reduction(source, output, dim=1)
+
+    source = tilelang.lower(
+        kernel,
+        target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
+        runtime_mode="cmodel",
+    ).kernel_source
+    assert f"rvt_cfg_stencil(1, {width}, 1, 1, false, false);" in source
+    assert source.count(instruction) == 1
+    assert "rvt_cfg_pad(0," in source
+    assert "rvt_cfg_insrt(0, 0, 0, 0," in source
+    assert "rv_column" not in source
+
+
 @pytest.mark.parametrize("dtype", ("e4m3_float8", "e5m2_float8"))
 def test_fp8_reduce_sum_is_available_only_to_rv(dtype):
 
@@ -540,7 +570,9 @@ def test_fp8_reduce_sum_is_available_only_to_rv(dtype):
         target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
         runtime_mode="cmodel",
     ).kernel_source
-    assert "rvt_fadd(10, 10, 8);" in rv_source
+    assert "rvt_cfg_stencil(1, 65, 1, 1, false, false);" in rv_source
+    assert "rvt_pool_favg(10, 8, 1, 0);" in rv_source
+    assert "rv_column" not in rv_source
     with pytest.raises(tvm.error.TVMError, match="supports FP8 only with RV Tensor"):
         tilelang.lower(kernel, target=_target("bm1690"), runtime_mode="cmodel")
 

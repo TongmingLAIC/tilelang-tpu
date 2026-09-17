@@ -368,28 +368,32 @@ void CodeGenTileLangTPU::EmitRVReduction(const std::string &operation,
                                          const std::string &dst, DataType dtype,
                                          int width) {
   const auto type = RVDTypeName(dtype);
+  ICHECK(operation == "sum" || operation == "max")
+      << "RV Tensor reduction supports sum or max, got " << operation;
+  ICHECK_GT(width, 0);
+  ICHECK_LT(width, 1 << 16)
+      << "RV Tensor reduction width exceeds the stencil field";
+  EmitRVDescriptor(src, 8, false, type, true);
   EmitRVDescriptor(dst, 10, false, type, true);
-  stream << "rvt_cfg_satu(0, false);\nrvt_cfg_round_mode(0);\n";
-  // Both public reductions overwrite the destination. Starting max at the
-  // first input also handles all-negative tiles without a finite sentinel.
+  // A rank-2 TileLang tile is described as (1, rows, 1, width). Configure a
+  // single 1 x width pooling window so every row is reduced to one value.
+  // Reset padding/insertion explicitly because these CSRs are shared by all
+  // pooling instructions in the kernel.
+  stream << "{\nuint32_t rv_pool_zero = 0;\n"
+         << "rvt_cfg_pad(0, (array4_t){.n=0, .c=0, .h=0, .w=0}, "
+            "&rv_pool_zero);\n"
+         << "rvt_cfg_insrt(0, 0, 0, 0, &rv_pool_zero);\n}\n"
+         << "rvt_cfg_stencil(1, " << width
+         << ", 1, 1, false, false);\n"
+         << "rvt_cfg_satu(0, false);\nrvt_cfg_round_mode(0);\n";
   if (operation == "sum") {
-    EmitRVConstant(0, type);
-    stream << "rvt_cp(10, 1);\n";
-  }
-  stream << "{\nfor (int rv_column = 0; rv_column < " << width
-         << "; ++rv_column) {\n"
-         << "rvt_tr(8, PRECISION(" << type << "), FP8TYPE(" << type << "), "
-         << src << ".addr + rv_column * " << dtype.bytes()
-         << ", FREE_LAYOUT, (array4_t){.n=1, .c=" << src
-         << ".shape.c, .h=1, .w=1}, (int[4]){" << src << ".stride.n, " << src
-         << ".stride.c, " << src << ".stride.h, 1});\n";
-  if (operation == "sum") {
-    stream << "rvt_fadd(10, 10, 8);\n";
+    // rvt_pool_favg computes sum(px * w); a scalar weight of one is an
+    // unscaled reduction. _rq=0 keeps the output in the source dtype.
+    EmitRVConstant(1, type);
+    stream << "rvt_pool_favg(10, 8, 1, 0);\n";
   } else {
-    stream << "if (rv_column == 0) { rvt_cp(10, 8); } "
-           << "else { rvt_fmax(10, 10, 8); }\n";
+    stream << "rvt_pool_fmax(10, 8);\n";
   }
-  stream << "}\n}\n";
 }
 
 void CodeGenTileLangTPU::EmitRVExp(const std::string &dst,

@@ -69,13 +69,14 @@ supported directly; no automatic down-conversion is required.
 | --- | --- | --- | --- | --- |
 | `ppl_exp` | Coefficient load plus `tpu_bdc_fp_exp` | Range reduction and polynomial composed from RV arithmetic/conversion instructions | FP16, BF16, FP32 | FP32 |
 | `ppl_rsqrt` | `tpu_bdc_fp_rsqrt` | `rvt_sfu_rsqrt` | FP16, BF16, FP32 | FP16, BF16, FP32 |
-| `ppl_reduce_sum` | Zero padding plus staged `tpu_bdc_fp_avg_pool2d` | Sequential column slices plus `rvt_fadd` | FP16, BF16, FP32 | E4M3, E5M2, FP16, BF16, FP32 |
-| `ppl_reduce_max` | Negative-maximum padding plus staged `tpu_bdc_fp_max_pool2d` | Sequential column slices plus `rvt_fmax` | E4M3, E5M2, FP16, BF16, FP32 | E4M3, E5M2, FP16, BF16, FP32 |
+| `ppl_reduce_sum` | Zero padding plus staged `tpu_bdc_fp_avg_pool2d` | `rvt_pool_favg` with a scalar weight of one | FP16, BF16, FP32 | E4M3, E5M2, FP16, BF16, FP32 |
+| `ppl_reduce_max` | Negative-maximum padding plus staged `tpu_bdc_fp_max_pool2d` | `rvt_pool_fmax` | E4M3, E5M2, FP16, BF16, FP32 | E4M3, E5M2, FP16, BF16, FP32 |
 
 Both reductions currently accept rank-2 input and output and reduce only
-`dim=1`. RV FP8 sum uses same-format additions, so every accumulation step is
-rounded to the selected FP8 format. TPU-Kernel FP8 sum, FP8 exp, and FP8 rsqrt
-are rejected because direct CModel probes do not produce a valid result.
+`dim=1`. RV configures one `1 x width` pooling window per rank-2 tile;
+`rvt_pool_favg` accumulates the window before converting the result to the
+output dtype. TPU-Kernel FP8 sum, FP8 exp, and FP8 rsqrt are rejected because
+direct CModel probes do not produce a valid result.
 
 ## Row lookup and sorting
 
