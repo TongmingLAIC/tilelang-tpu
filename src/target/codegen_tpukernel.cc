@@ -723,12 +723,13 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     ICHECK(dtype_ == DataType::Float(16) ||
            dtype_ == DataType::BFloat(16) ||
            dtype_ == DataType::Float(32) || is_fp8)
-        << op_name << " supports FP8, FP16, BF16, and FP32, got " << dtype_;
-    if (is_fp8 && target_programming_model_ != "rv") {
+        << op_name << " supports FP16, BF16, and FP32, got " << dtype_;
+    if (is_fp8) {
       throw tvm::runtime::Error(
           op_name +
-          " supports FP8 only with RV Tensor; TPU-Kernel supports FP16, "
-          "BF16, and FP32");
+          " does not support FP8: SG2260E rvt_pool_favg requires a wider "
+          "computation dtype, but the current SDK cannot execute that "
+          "descriptor combination correctly; use FP16, BF16, or FP32");
     }
     std::string dtype, dtype_2;
     if (dtype_ == DataType::Float(16)) {

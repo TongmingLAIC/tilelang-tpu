@@ -532,9 +532,9 @@ def test_fp8_reduce_max_selects_validated_backend(chip, programming_model, instr
         (T.ppl_reduce_max, "rvt_pool_fmax(10, 8);"),
     ),
 )
-@pytest.mark.parametrize("dtype", ("e4m3_float8", "e5m2_float8", "float16", "bfloat16", "float32"))
+@pytest.mark.parametrize("dtype", ("float16", "bfloat16", "float32"))
 @pytest.mark.parametrize("width", (1, 65, 4096))
-def test_rv_reduction_uses_one_pooling_instruction(reduction, instruction, dtype, width):
+def test_rv_reduction_selects_validated_instruction_sequence(reduction, instruction, dtype, width):
 
     @T.prim_func
     def kernel():
@@ -556,7 +556,7 @@ def test_rv_reduction_uses_one_pooling_instruction(reduction, instruction, dtype
 
 
 @pytest.mark.parametrize("dtype", ("e4m3_float8", "e5m2_float8"))
-def test_fp8_reduce_sum_is_available_only_to_rv(dtype):
+def test_fp8_reduce_sum_is_rejected_until_wide_pooling_is_supported(dtype):
 
     @T.prim_func
     def kernel():
@@ -565,16 +565,12 @@ def test_fp8_reduce_sum_is_available_only_to_rv(dtype):
             output = T.alloc_shared((4, 1), dtype)
             T.ppl_reduce_sum(source, output, dim=1)
 
-    rv_source = tilelang.lower(
-        kernel,
-        target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
-        runtime_mode="cmodel",
-    ).kernel_source
-    assert "rvt_cfg_stencil(1, 65, 1, 1, false, false);" in rv_source
-    assert "rvt_pool_favg(10, 8, 1, 0);" in rv_source
-    assert "rv_column" not in rv_source
-    with pytest.raises(tvm.error.TVMError, match="supports FP8 only with RV Tensor"):
-        tilelang.lower(kernel, target=_target("bm1690"), runtime_mode="cmodel")
+    for target in (
+        "tpu -mcpu=sg2260e -tpu-programming-model=rv",
+        _target("bm1690"),
+    ):
+        with pytest.raises(tvm.error.TVMError, match="does not support FP8"):
+            tilelang.lower(kernel, target=target, runtime_mode="cmodel")
 
 
 @pytest.mark.parametrize(
