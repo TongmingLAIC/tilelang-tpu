@@ -144,7 +144,8 @@ private:
   void EmitRVScalar(const std::string &operation, const std::string &dst,
                     const std::string &src, DataType dtype, double value);
   void EmitRVReduction(const std::string &operation, const std::string &src,
-                       const std::string &dst, DataType dtype, int width);
+                       const std::string &dst, const std::string &scratch,
+                       DataType dtype, int width);
   void EmitRVExp(const std::string &dst, const std::string &work0,
                  const std::string &work1, DataType dtype);
   void EmitRVDescriptor(const std::string &tensor, int register_id,

@@ -898,8 +898,9 @@ def ppl_reduce_sum(inp, out, dim):
 
     Dtype support:
         - TPU-Kernel: FP16, BF16, and FP32.
-        - RV Tensor: E4M3, E5M2, FP16, BF16, and FP32. RV pooling performs the
-          window accumulation before converting to the output dtype.
+        - RV Tensor: FP16, BF16, and FP32. FP16/BF16 inputs are reduced in
+          FP32 chunks before conversion to the output dtype. NaN and infinity
+          propagate through this reduction.
     """
     for name, buffer in (("inp", inp), ("out", out)):
         _require_local_buffer(name, buffer)
@@ -958,6 +959,8 @@ def ppl_reduce_max(inp, out, dim):
         This operation always overwrites `out`.  Cross-tile accumulation must
         be expressed as a separate max operation; the TPU-Kernel reduction
         sequence does not consume the previous contents of `out`.
+        NaN propagation is unspecified; rows containing NaNs may produce
+        different results across backends or reduction widths.
 
     Dtype support:
         - TPU-Kernel: E4M3, E5M2, FP16, BF16, and FP32.

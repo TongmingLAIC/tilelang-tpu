@@ -525,16 +525,10 @@ def test_fp8_reduce_max_selects_validated_backend(chip, programming_model, instr
     assert instruction in source
 
 
-@pytest.mark.parametrize(
-    ("reduction", "instruction"),
-    (
-        (T.ppl_reduce_sum, "rvt_pool_favg(10, 8, 1, 0);"),
-        (T.ppl_reduce_max, "rvt_pool_fmax(10, 8);"),
-    ),
-)
+@pytest.mark.parametrize("reduction", (T.ppl_reduce_sum, T.ppl_reduce_max))
 @pytest.mark.parametrize("dtype", ("float16", "bfloat16", "float32"))
 @pytest.mark.parametrize("width", (1, 65, 4096))
-def test_rv_reduction_selects_validated_instruction_sequence(reduction, instruction, dtype, width):
+def test_rv_reduction_selects_validated_instruction_sequence(reduction, dtype, width):
 
     @T.prim_func
     def kernel():
@@ -548,7 +542,18 @@ def test_rv_reduction_selects_validated_instruction_sequence(reduction, instruct
         target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
         runtime_mode="cmodel",
     ).kernel_source
-    assert f"rvt_cfg_stencil(1, {width}, 1, 1, false, false);" in source
+    low_precision_sum = reduction is T.ppl_reduce_sum and dtype != "float32"
+    if low_precision_sum:
+        instruction = "rvt_pool_favg(9, 10, 1, 0);"
+        assert "rvt_cfg_stencil(1, 16, 1, 1, false, false);" in source
+        assert "rv_offset += 16" in source
+        assert "rvt_cvt_f2f(11, 8);" in source
+        assert "rvt_fadd(10, 10, 11);" in source
+        assert "rvt_cfg_satu(0, false);\nrvt_cvt_f2f(10, 9);" in source
+    else:
+        instruction = ("rvt_pool_favg(10, 8, 1, 0);" if reduction is T.ppl_reduce_sum
+                       else "rvt_pool_fmax(10, 8);")
+        assert f"rvt_cfg_stencil(1, {width}, 1, 1, false, false);" in source
     assert source.count(instruction) == 1
     assert "rvt_cfg_pad(0," in source
     assert "rvt_cfg_insrt(0, 0, 0, 0," in source

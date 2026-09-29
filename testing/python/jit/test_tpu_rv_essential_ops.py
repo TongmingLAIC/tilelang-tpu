@@ -20,7 +20,11 @@ DTYPES = ("float16", "bfloat16", "float32")
 CASES = tuple(
     f"{op}.{dtype}" for op in ("fill", "scalar", "rsqrt", "sum", "max") for dtype in DTYPES) + (
         "sum-wide.float32", "max-wide.float32", "exp.float32", "sum-unit.float32",
-        "max-unit.float32", "sum-large.float32", "max-large.float32", "exp-extremes.float32",
+        "max-unit.float32", "sum-large.float32", "max-large.float32",
+        "sum-ones-large.float16", "sum-ones-large.bfloat16",
+        "sum-random-large.float16", "sum-random-large.bfloat16", "exp-extremes.float32",
+        "sum-special.float16", "sum-special.bfloat16",
+        "sum-overflow-edge.float16", "sum-overflow-edge.bfloat16",
         "sigmoid.float32", "rmsnorm.float32", "softmax.float32", "swiglu.float32") + tuple(
             f"{op}.{dtype}" for op in ("demo-rmsnorm", "demo-splitk", "demo-swiglu")
             for dtype in DTYPES)
@@ -137,11 +141,32 @@ def run_case(case, runtime, output_dir):
         rows, width = 65, 1
     elif op.endswith("-large"):
         rows, width = 4, 4096
+    elif op.endswith("-special"):
+        rows, width = 4, 33
+    elif op.endswith("-edge"):
+        rows, width = 8, 2
     else:
         rows, width = 65, (65 if "wide" in op else 33)
     torch.manual_seed(17)
     x = (torch.arange(rows * width).reshape(rows, width) % 17 - 8).float() / 4
-    if op == "rsqrt":
+    if op == "sum-ones-large":
+        x = torch.ones((rows, width), dtype=torch.float32)
+    elif op == "sum-random-large":
+        torch.manual_seed(7)
+        x = torch.randn((rows, width), dtype=torch.float32)
+    elif op == "sum-special":
+        x = torch.zeros((rows, width), dtype=torch.float32)
+        x[0, 0] = float("nan")
+        x[1, 0] = float("inf")
+        x[2, 0] = float("-inf")
+        x[3, :] = 65504.0 if dtype == "float16" else 1e38
+    elif op == "sum-overflow-edge":
+        largest = float(torch.finfo(getattr(torch, dtype)).max)
+        half_ulp = 16.0 if dtype == "float16" else float(2**119)
+        positive = torch.tensor([[largest, 0], [largest, half_ulp / 2],
+                                 [largest, half_ulp], [largest, 2 * half_ulp]])
+        x = torch.cat((positive, -positive))
+    elif op == "rsqrt":
         x = x.abs() + 0.25
     elif op.startswith("max"):
         x = -x.abs() - 1
@@ -190,18 +215,23 @@ def run_case(case, runtime, output_dir):
                   (2e-2, 1e-2))
     if op in ("fill", "scalar") or op.startswith(("sum", "max")):
         rtol = atol = 0
+    if op == "sum-random-large":
+        rtol, atol = ((3e-3, 2e-2) if dtype == "float16" else (2e-2, 2e-1))
+    expected_output = expected.to(x.dtype).float()
     torch.testing.assert_close(
-        result, expected.to(x.dtype).float(), rtol=rtol, atol=atol, equal_nan=True)
+        result, expected_output, rtol=rtol, atol=atol, equal_nan=True)
     # Explicitly check non-finite classes; atol alone cannot validate these.
-    assert torch.equal(torch.isnan(result), torch.isnan(expected))
-    assert torch.equal(torch.isposinf(result), torch.isposinf(expected))
-    assert torch.equal(torch.isneginf(result), torch.isneginf(expected))
+    assert torch.equal(torch.isnan(result), torch.isnan(expected_output))
+    assert torch.equal(torch.isposinf(result), torch.isposinf(expected_output))
+    assert torch.equal(torch.isneginf(result), torch.isneginf(expected_output))
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
-        torch.save({"input": x, "output": result, "expected": expected}, output_dir / f"{case}.pt")
+        torch.save({"input": x, "output": result, "expected": expected_output},
+                   output_dir / f"{case}.pt")
         (output_dir / f"{case}.c").write_text(compiled.get_kernel_source())
-    finite = torch.isfinite(result) & torch.isfinite(expected)
-    error = (result[finite] - expected[finite]).abs().max().item() if finite.any() else 0.
+    finite = torch.isfinite(result) & torch.isfinite(expected_output)
+    error = ((result[finite] - expected_output[finite]).abs().max().item()
+             if finite.any() else 0.)
     print(
         "RV_ESSENTIAL_RESULT=" + json.dumps({
             "case": case,

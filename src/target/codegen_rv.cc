@@ -365,8 +365,9 @@ void CodeGenTileLangTPU::EmitRVScalar(const std::string &operation,
 
 void CodeGenTileLangTPU::EmitRVReduction(const std::string &operation,
                                          const std::string &src,
-                                         const std::string &dst, DataType dtype,
-                                         int width) {
+                                         const std::string &dst,
+                                         const std::string &scratch,
+                                         DataType dtype, int width) {
   const auto type = RVDTypeName(dtype);
   ICHECK(operation == "sum" || operation == "max")
       << "RV Tensor reduction supports sum or max, got " << operation;
@@ -375,24 +376,68 @@ void CodeGenTileLangTPU::EmitRVReduction(const std::string &operation,
       << "RV Tensor reduction width exceeds the stencil field";
   EmitRVDescriptor(src, 8, false, type, true);
   EmitRVDescriptor(dst, 10, false, type, true);
-  // A rank-2 TileLang tile is described as (1, rows, 1, width). Configure a
-  // single 1 x width pooling window so every row is reduced to one value.
+  // A rank-2 TileLang tile is described as (1, rows, 1, width). Pool across
+  // W, keeping C (the TileLang row axis) unchanged.
   // Reset padding/insertion explicitly because these CSRs are shared by all
   // pooling instructions in the kernel.
   stream << "{\nuint32_t rv_pool_zero = 0;\n"
          << "rvt_cfg_pad(0, (array4_t){.n=0, .c=0, .h=0, .w=0}, "
             "&rv_pool_zero);\n"
          << "rvt_cfg_insrt(0, 0, 0, 0, &rv_pool_zero);\n}\n"
-         << "rvt_cfg_stencil(1, " << width
-         << ", 1, 1, false, false);\n"
          << "rvt_cfg_satu(0, false);\nrvt_cfg_round_mode(0);\n";
   if (operation == "sum") {
-    // rvt_pool_favg computes sum(px * w); a scalar weight of one is an
-    // unscaled reduction. _rq=0 keeps the output in the source dtype.
-    EmitRVConstant(1, type);
-    stream << "rvt_pool_favg(10, 8, 1, 0);\n";
+    // rvt_pool_favg computes sum(px * w); a scalar weight of one makes it an
+    // unscaled reduction. _rq=0 does not requantize the result.
+    if (dtype != DataType::Float(32)) {
+      // Pooling with low-precision input/output descriptors does not produce
+      // an FP32-accumulated sum. Accumulate sixteen FP32 lanes in the output
+      // tile's 64-byte aligned row, then pool once at the end. Each scratch
+      // row also holds sixteen FP32s.
+      stream << "rvt_tr(10, PRECISION(DT_FP32), FP8TYPE(DT_FP32), " << dst
+             << ".addr, HW_ALIGN_LAYOUT, (array4_t){.n=1, .c=" << src
+             << ".shape.c, .h=1, .w=16}, (int *)NULL);\n";
+      EmitRVConstant(0, "DT_FP32");
+      stream << "rvt_cp(10, 1);\n";
+      EmitRVConstant(1, "DT_FP32");
+      stream << "{\nfor (int rv_offset = 0; rv_offset < " << width
+             << "; rv_offset += 16) {\n"
+             << "int rv_width = (" << width << " - rv_offset < 16) ? " << width
+             << " - rv_offset : 16;\n"
+             << "rvt_tr(8, PRECISION(" << type << "), FP8TYPE(" << type << "), "
+             << src << ".addr + rv_offset * " << dtype.bytes()
+             << ", FREE_LAYOUT, (array4_t){.n=1, .c=" << src
+             << ".shape.c, .h=1, .w=rv_width}, (int[4]){" << src
+             << ".stride.n, " << src << ".stride.c, " << src
+             << ".stride.h, 1});\n"
+             << "rvt_tr(11, PRECISION(DT_FP32), FP8TYPE(DT_FP32), " << scratch
+             << ".addr, HW_ALIGN_LAYOUT, (array4_t){.n=1, .c=" << src
+             << ".shape.c, .h=1, .w=rv_width}, (int *)NULL);\n"
+             << "rvt_cvt_f2f(11, 8);\n"
+             << "rvt_tr(10, PRECISION(DT_FP32), FP8TYPE(DT_FP32), " << dst
+             << ".addr, HW_ALIGN_LAYOUT, (array4_t){.n=1, .c=" << src
+             << ".shape.c, .h=1, .w=rv_width}, (int *)NULL);\n"
+             << "rvt_fadd(10, 10, 11);\n"
+             << "}\n}\n"
+             << "rvt_tr(10, PRECISION(DT_FP32), FP8TYPE(DT_FP32), " << dst
+             << ".addr, HW_ALIGN_LAYOUT, (array4_t){.n=1, .c=" << src
+             << ".shape.c, .h=1, .w=16}, (int *)NULL);\n"
+             << "rvt_tr(9, PRECISION(DT_FP32), FP8TYPE(DT_FP32), " << scratch
+             << ".addr, HW_ALIGN_LAYOUT, (array4_t){.n=1, .c=" << src
+             << ".shape.c, .h=1, .w=1}, (int *)NULL);\n"
+             << "rvt_cfg_stencil(1, 16, 1, 1, false, false);\n"
+             << "rvt_pool_favg(9, 10, 1, 0);\n";
+      EmitRVDescriptor(dst, 10, false, type, true);
+      // Keep overflow and input infinities as infinities on the final cast.
+      stream << "rvt_cfg_satu(0, false);\n"
+             << "rvt_cvt_f2f(10, 9);\n";
+    } else {
+      stream << "rvt_cfg_stencil(1, " << width << ", 1, 1, false, false);\n";
+      EmitRVConstant(1, type);
+      stream << "rvt_pool_favg(10, 8, 1, 0);\n";
+    }
   } else {
-    stream << "rvt_pool_fmax(10, 8);\n";
+    stream << "rvt_cfg_stencil(1, " << width << ", 1, 1, false, false);\n"
+           << "rvt_pool_fmax(10, 8);\n";
   }
 }
 
