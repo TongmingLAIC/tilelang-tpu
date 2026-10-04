@@ -515,7 +515,7 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     ICHECK_EQ(tmp_shape[1], expected_eu)
         << op_name << " scratch width must equal the dtype-specific EU size";
     if (target_programming_model_ == "rv") {
-      EmitRVReduction("max", input_tensor, output_tensor, dtype_,
+      EmitRVReduction("max", input_tensor, output_tensor, tmp_tensor, dtype_,
                       input_shape[1]);
       return true;
     }
@@ -723,12 +723,12 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     ICHECK(dtype_ == DataType::Float(16) ||
            dtype_ == DataType::BFloat(16) ||
            dtype_ == DataType::Float(32) || is_fp8)
-        << op_name << " supports FP8, FP16, BF16, and FP32, got " << dtype_;
-    if (is_fp8 && target_programming_model_ != "rv") {
+        << op_name << " supports FP16, BF16, and FP32, got " << dtype_;
+    if (is_fp8) {
       throw tvm::runtime::Error(
           op_name +
-          " supports FP8 only with RV Tensor; TPU-Kernel supports FP16, "
-          "BF16, and FP32");
+          " does not support FP8 on TPU-Kernel or RV Tensor; convert to "
+          "FP16, BF16, or FP32 before reduction");
     }
     std::string dtype, dtype_2;
     if (dtype_ == DataType::Float(16)) {
@@ -775,7 +775,7 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     ICHECK_EQ(tmp_shape[1], expected_eu)
         << op_name << " scratch width must equal the dtype-specific EU size";
     if (target_programming_model_ == "rv") {
-      EmitRVReduction("sum", input_tensor, output_tensor, dtype_,
+      EmitRVReduction("sum", input_tensor, output_tensor, tmp_tensor, dtype_,
                       input_shape[1]);
       return true;
     }

@@ -870,7 +870,7 @@ def _reduce_sum_impl(inp, out, dim, eu_elements):
         channel = T.int32(64)
         align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num
         stride = T.ceildiv(inp.shape[0], channel) * align_w
-        # Shared semantic ABI: TPU-Kernel uses padded pooling; RV uses column slices.
+        # Shared semantic ABI: each backend selects its validated pooling sequence.
         T.call_extern("handle", "tl.tpu.reduce_sum", _tpu_tensor_region(inp, "rw"),
                       _tpu_tensor_region(out, "w"), _tpu_tensor_region(tmp_buffer_sum, "rw"),
                       eu_num, align_w, stride)
@@ -898,8 +898,9 @@ def ppl_reduce_sum(inp, out, dim):
 
     Dtype support:
         - TPU-Kernel: FP16, BF16, and FP32.
-        - RV Tensor: E4M3, E5M2, FP16, BF16, and FP32. FP8 accumulation rounds
-          after every same-format add.
+        - RV Tensor: FP16, BF16, and FP32. FP16/BF16 inputs are reduced in
+          FP32 chunks before conversion to the output dtype. NaN and infinity
+          propagate through this reduction.
     """
     for name, buffer in (("inp", inp), ("out", out)):
         _require_local_buffer(name, buffer)
@@ -931,7 +932,7 @@ def _reduce_max_impl(inp, out, dim, eu_elements):
         channel = T.int32(64)
         align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num
         stride = T.ceildiv(inp.shape[0], channel) * align_w
-        # Shared semantic ABI: TPU-Kernel uses padded pooling; RV uses column slices.
+        # Shared semantic ABI: each backend selects its validated pooling sequence.
         T.call_extern("handle", "tl.tpu.reduce_max", _tpu_tensor_region(inp, "rw"),
                       _tpu_tensor_region(out, "w"), _tpu_tensor_region(tmp_buffer_max, "rw"),
                       eu_num, align_w, stride)
@@ -958,6 +959,8 @@ def ppl_reduce_max(inp, out, dim):
         This operation always overwrites `out`.  Cross-tile accumulation must
         be expressed as a separate max operation; the TPU-Kernel reduction
         sequence does not consume the previous contents of `out`.
+        NaN propagation is unspecified; rows containing NaNs may produce
+        different results across backends or reduction widths.
 
     Dtype support:
         - TPU-Kernel: E4M3, E5M2, FP16, BF16, and FP32.

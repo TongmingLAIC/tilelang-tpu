@@ -107,17 +107,16 @@ _CASES = (
     "gemm-nt-overwrite",
     "gemm-nt-accumulate",
 )
-_TPUKERNEL_UNSUPPORTED_CASES = frozenset({"reduce-sum"})
+_UNSUPPORTED_CASES = frozenset({"reduce-sum"})
 
 
 def _selected_cases(args: argparse.Namespace) -> tuple[str, ...]:
     """Return the explicit or backend-specific default FP8 case set."""
     cases = tuple(args.cases) if args.cases else tuple(
-        case for case in _CASES
-        if args.programming_model != "tpukernel" or case not in _TPUKERNEL_UNSUPPORTED_CASES)
-    unsupported = _TPUKERNEL_UNSUPPORTED_CASES.intersection(cases)
-    if args.programming_model == "tpukernel" and unsupported:
-        raise RuntimeError("TPU-Kernel has no validated FP8 implementation for: " +
+        case for case in _CASES if case not in _UNSUPPORTED_CASES)
+    unsupported = _UNSUPPORTED_CASES.intersection(cases)
+    if unsupported:
+        raise RuntimeError("no validated FP8 implementation for: " +
                            ", ".join(sorted(unsupported)))
     return cases
 
@@ -308,7 +307,7 @@ def _validate_pcie_promotion(
     if not isinstance(bm_results, dict) or not isinstance(sg_results, dict):
         raise RuntimeError("FP8 promotion summary has no case result map")
     missing = []
-    bm_cases = tuple(case for case in cases if case not in _TPUKERNEL_UNSUPPORTED_CASES)
+    bm_cases = tuple(case for case in cases if case not in _UNSUPPORTED_CASES)
     for dtype in dtypes:
         for case in cases:
             required_results = [(f"sg2260e/{args.programming_model}/{dtype}/{case}",
