@@ -237,8 +237,11 @@ def run(*,
         kv_heads=kv_heads,
         dtype=dtype,
         programming_model=programming_model)
+    # The key and value tables hold the same rows, but the adapter rejects
+    # aliased storage across parameters, so each gets its own buffer.
     timing = compile_and_launch(
-        program, (q, kcache, vcache, tables, tables, kstage, vstage, destination),
+        program,
+        (q, kcache, vcache, tables, tables.clone(), kstage, vstage, destination),
         chip=chip,
         programming_model=programming_model,
         runtime_mode=runtime_mode)
