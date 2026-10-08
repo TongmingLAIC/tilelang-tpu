@@ -47,6 +47,12 @@ def run_case(case_id: str,
     if case.operation == "flashattn":
         from tpu_demo.flashattn import run
         return run(variant=case.variant, is_causal=case.is_causal, **common)
+    if case.operation == "gptq-w4a16":
+        # Returns a payload with `status` either "passed" or "unsupported";
+        # a target without the dequantize lowering reports the latter rather
+        # than raising.
+        from tpu_demo.gptq_w4a16 import run
+        return run(**common)
     raise AssertionError(f"unhandled registered operation {case.operation!r}")
 
 

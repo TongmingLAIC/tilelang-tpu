@@ -30,12 +30,20 @@ OPERATIONS = (
     "rope",
     "swiglu",
     "flashattn",
+    "gptq-w4a16",
 )
+# `gptq-w4a16` is listed here even though no current target lowers it.  The
+# demo's job is to *measure* that, and `validate_selection` must let it reach
+# the compiler so the verdict comes from the toolchain rather than from this
+# table.
 RV_SUPPORTED_OPERATIONS = frozenset(OPERATIONS)
 OPERATION_DTYPES = {
     operation: (BASE_DTYPES if operation == "elementwise-div" else DTYPES)
     for operation in OPERATIONS
 }
+# W4A16 dequantizes into a half-precision weight, so only FP16 and BF16 are
+# meaningful outputs; FP8 and FP32 would be exercising a different operator.
+OPERATION_DTYPES["gptq-w4a16"] = ("float16", "bfloat16")
 
 
 def kernel_variant(operation: str, dtype: str, programming_model: str) -> str:
@@ -65,6 +73,8 @@ def kernel_variant(operation: str, dtype: str, programming_model: str) -> str:
         return f"flashattn_{precision}"
     if operation == "rope":
         return "rope"
+    if operation == "gptq-w4a16":
+        return "gptq_w4a16"
     raise AssertionError(f"unhandled TPU demo operation: {operation}")
 
 

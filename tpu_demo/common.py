@@ -28,6 +28,21 @@ class DemoNumericalMismatch(AssertionError):
         self.metrics = dict(metrics)
 
 
+class DemoUnsupported(RuntimeError):
+    """The selected target has no lowering for a primitive this demo needs.
+
+    Distinct from :class:`DemoNumericalMismatch`: nothing was computed and no
+    result was produced.  The demo reports this as a first-class verdict so a
+    target that gains the missing lowering later simply starts passing, while
+    one that does not keeps a reproducible, machine-readable record instead of
+    a crash.
+    """
+
+    def __init__(self, message: str, evidence: Mapping[str, Any]):
+        super().__init__(message)
+        self.evidence = dict(evidence)
+
+
 def torch_dtype(dtype: str) -> torch.dtype:
     try:
         return {
@@ -303,4 +318,37 @@ def result_payload(
         "parameters": result_parameters,
         "metrics": dict(metrics),
         "timing": dict(timing),
+    }
+
+
+def unsupported_payload(
+    *,
+    operation: str,
+    dtype: str,
+    chip: str,
+    programming_model: str,
+    runtime_mode: str,
+    reason: str,
+    evidence: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Report that a demo could not be built for the selected target.
+
+    Mirrors :func:`result_payload` so a matrix runner can consume both verdicts
+    with the same parser; ``status`` is ``"unsupported"`` rather than
+    ``"passed"``, and ``evidence`` carries the toolchain diagnostic that
+    justified the verdict.
+    """
+    result_parameters = dict(parameters)
+    result_parameters["kernel_variant"] = kernel_variant(operation, dtype, programming_model)
+    return {
+        "status": "unsupported",
+        "operation": operation,
+        "dtype": dtype,
+        "chip": chip,
+        "programming_model": programming_model,
+        "runtime_mode": runtime_mode,
+        "parameters": result_parameters,
+        "reason": reason,
+        "evidence": dict(evidence),
     }
