@@ -17,6 +17,10 @@
 
 tpuRtStream_t stream = nullptr;
 tpuRtKernelModule_t tpu_module = nullptr;
+// The vendor runtime and the loaded kernel module are process-global
+// resources.  Rebuilding them for every dispatch makes a launch cost ~145 ms
+// simply to reload this module, while the dispatch itself is ~0.2 ms.
+static bool tilelang_tpu_runtime_ready = false;
 static std::mutex tilelang_tpu_profile_mutex;
 static int tilelang_tpu_expected_device_id = -1;
 #ifdef TILELANG_TPU_PCIE_PROFILING
@@ -157,6 +161,9 @@ static const char* tilelang_tpu_kernel_path() {{
 }}
 
 int init() {{
+  if (tilelang_tpu_runtime_ready) {{
+    return 0;
+  }}
 #ifdef USING_CMODEL
 #ifndef TILELANG_TPU_CMODEL_CORE_NUM
 #error "CModel main.so must embed the target core count"
@@ -205,6 +212,7 @@ int init() {{
     stream = nullptr;
     return -6;
   }}
+  tilelang_tpu_runtime_ready = true;
   return 0;
 }}
 
@@ -348,7 +356,14 @@ extern "C" int tilelang_tpu_run(void** args) {{
   }} while (false);
 
 {free_statements}
-  post();
+  // Teardown is the expensive half of a dispatch: tpuRtKernelUnloadModule plus
+  // a fresh tpuRtKernelLoadModuleFile next call dominate the ~145 ms a launch
+  // used to cost.  Keep the module resident by default and let a caller opt
+  // back into per-call teardown for leak checking.
+  if (tilelang_tpu_env_is_one("TILELANG_TPU_POST_EACH_CALL")) {{
+    post();
+    tilelang_tpu_runtime_ready = false;
+  }}
 #ifdef TILELANG_TPU_PCIE_PROFILING
   if (profile_handle != nullptr) {{
     tpudnnDestroy(profile_handle);

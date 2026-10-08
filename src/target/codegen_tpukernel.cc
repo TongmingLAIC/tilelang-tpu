@@ -433,6 +433,115 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
                  << ".addr, " << tensors[1] << ".addr, " << tensors[2]
                  << ".addr, " << tensors[3] << ".addr, &" << tensors[0]
                  << ".shape, " << dtype_name << ");\n";
+  } else if (op_name == "tl.tpu.dq2") {
+    ICHECK_EQ(op->args.size(), 5U)
+        << op_name << " expects dst, packed weights, offset_scale, and gsize";
+    auto dst_operand = ParseWholeBufferRegion(op->args[1], op_name + " dst", 2);
+    auto packed_operand =
+        ParseWholeBufferRegion(op->args[2], op_name + " src", 1);
+    auto scale_operand =
+        ParseWholeBufferRegion(op->args[3], op_name + " offset_scale", 1);
+    ICHECK(dst_operand.is_local && packed_operand.is_local &&
+           scale_operand.is_local)
+        << op_name << " operands must all reside in local memory";
+    ICHECK(dst_operand.data_var != packed_operand.data_var &&
+           dst_operand.data_var != scale_operand.data_var &&
+           packed_operand.data_var != scale_operand.data_var)
+        << op_name << " requires distinct dst, src, and offset_scale storage";
+    ICHECK(dst_operand.dtype == DataType::Float(16) ||
+           dst_operand.dtype == DataType::BFloat(16))
+        << op_name << " dst must be FP16 or BF16, got " << dst_operand.dtype;
+    ICHECK(packed_operand.dtype == DataType::UInt(8))
+        << op_name
+        << " src must be UINT8 holding two 4-bit weights per element, got "
+        << packed_operand.dtype;
+    ICHECK(scale_operand.dtype == DataType::UInt(32))
+        << op_name
+        << " offset_scale must be UINT32 (low 16 bits offset, high 16 bits "
+           "scale, both FP16), got "
+        << scale_operand.dtype;
+    for (const auto *operand : {&dst_operand, &packed_operand, &scale_operand}) {
+      ICHECK_EQ(operand->rank, 2U)
+          << op_name << " requires rank-2 dst, src, and offset_scale";
+    }
+    const auto *gsize_node = op->args[4].as<IntImmNode>();
+    ICHECK(gsize_node) << op_name << " requires a compile-time integer gsize";
+    const int64_t gsize = gsize_node->value;
+    ICHECK_GT(gsize, 0) << op_name << " requires a positive gsize";
+    const int64_t k_extent = dst_operand.shape4[3];
+    ICHECK_EQ(packed_operand.shape4[3] * 2, k_extent)
+        << op_name
+        << " src packs two 4-bit weights per byte, so its W extent must be "
+           "half of dst's";
+    ICHECK_EQ(k_extent % gsize, 0)
+        << op_name << " requires gsize to divide the dst W extent";
+    ICHECK_EQ(scale_operand.shape4[3], k_extent / gsize)
+        << op_name
+        << " offset_scale must carry exactly one packed word per group";
+    ICHECK(dst_operand.shape4[1] == packed_operand.shape4[1] &&
+           dst_operand.shape4[1] == scale_operand.shape4[1])
+        << op_name << " requires dst, src, and offset_scale to share the N "
+                       "extent";
+    // The standalone dequantize this needs exists in the TPU-Kernel layer and
+    // NOT in the RV layer.  `tpu_bdc_f16_group_dequant` is the instruction the
+    // firmware's own Llama MLP uses on this chip (see
+    // nodechip_llama_mlp_multi_core.c.o's undefined reference to it), and it is
+    // what PPL lowers `tiu::dq2` to on chips whose RV backend implements it
+    // (verified against a bm1684xe build of w4a16_matmul_dq2.pl).
+    //
+    // Do NOT lower this to `rvt_dq2`, even though the symbol exists in
+    // libfirmware_core.a: PPL's RV backend emits an unconditional assert for
+    // `tiu::dq2` ("Chip have no instruction like DQ2Op"), and emitting
+    // `rvt_dq2` directly blocks the device forever in
+    // rt_task_done_response_sync, wedging the card until it is re-modprobed.
+    ICHECK_EQ(target_programming_model_, "tpukernel")
+        << op_name
+        << " is TPU-Kernel-only on this chip. PPL's RV backend has no tiu::dq2 "
+           "lowering and a direct rvt_dq2 emission hangs the device; build with "
+           "-tpu-programming-model=tpukernel instead.";
+    // Mirrors the guard the reference build emits before the call.
+    ICHECK(gsize == 32 || gsize == 64 || gsize == 128 || gsize == 256)
+        << op_name << " requires gsize to be 32, 64, 128, or 256, got " << gsize;
+    // Argument order and the DT_UINT4 src type follow the reference call:
+    //   tpu_bdc_f16_group_dequant(dst, src, quant, &shape, src_dtype,
+    //                             dst_dtype, group)
+    // The shape is taken from dst (W = the unpacked element count).
+    PrintIndent();
+    this->stream << "tpu_bdc_f16_group_dequant(" << dst_operand.descriptor
+                 << ".addr, " << packed_operand.descriptor << ".addr, "
+                 << scale_operand.descriptor << ".addr, &"
+                 << dst_operand.descriptor << ".shape, DT_UINT4, "
+                 << TPUKernelDTypeName(dst_operand.dtype) << ", " << gsize
+                 << ");\n";
+  } else if (op_name == "tl.tpu.scatter") {
+    ICHECK_EQ(op->args.size(), 4U)
+        << op_name << " expects dst, src, and an index table";
+    auto dst_operand = ParseWholeBufferRegion(op->args[1], op_name + " dst", 2);
+    auto src_operand = ParseWholeBufferRegion(op->args[2], op_name + " src", 1);
+    auto idx_operand =
+        ParseWholeBufferRegion(op->args[3], op_name + " index", 1);
+    ICHECK(!dst_operand.is_local)
+        << op_name << " dst must be a global tensor -- it is the paged cache";
+    ICHECK(src_operand.is_local && idx_operand.is_local)
+        << op_name << " src and index must reside in local memory";
+    ICHECK(dst_operand.dtype == DataType::Float(16) ||
+           dst_operand.dtype == DataType::BFloat(16))
+        << op_name << " dst must be FP16 or BF16, got " << dst_operand.dtype;
+    ICHECK_EQ(src_operand.dtype, dst_operand.dtype)
+        << op_name << " requires matching dst/src dtypes";
+    ICHECK(idx_operand.dtype == DataType::UInt(32))
+        << op_name << " index table must be UINT32, got " << idx_operand.dtype;
+    ICHECK(dst_operand.data_var != src_operand.data_var &&
+           dst_operand.data_var != idx_operand.data_var &&
+           src_operand.data_var != idx_operand.data_var)
+        << op_name << " requires distinct dst, src, and index storage";
+    // Only the RV backend has a lowering for this on the target chip; the
+    // TPU-Kernel layer's equivalent lives inside its fused attention kernels.
+    ICHECK_EQ(target_programming_model_, "rv")
+        << op_name
+        << " has only an RV lowering; build with -tpu-programming-model=rv";
+    EmitRVScatter(dst_operand.descriptor, src_operand.descriptor,
+                  idx_operand.descriptor, dst_operand.dtype);
   } else if (op_name == "tl.tpu.reduce_max") {
     ICHECK_EQ(op->args.size(), 7U)
         << op_name
@@ -987,8 +1096,17 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
       operands[i] = ParseWholeBufferRegion(
           op->args[i + 1], op_name + " operand " + std::to_string(i),
           kAccessMasks[i]);
+      // The instruction encoding can name a local destination, and the
+      // vendor's own lowering does set up the register-8 base plus
+      // register-9 view pair for it.  Reproducing that here still produced
+      // NaNs at every size tried, while the global form stays exact, so the
+      // difference is somewhere this path does not model -- most likely the
+      // LMEM base that the PPL allocator assigns.  Reject it loudly instead
+      // of emitting a silently wrong kernel.
       ICHECK(!operands[i].is_local)
-          << op_name << " uses the S2S API and requires global-memory operands";
+          << op_name << " requires global-memory operands; a local destination "
+                        "is not supported yet (see EmitRVScatter for the "
+                        "working local-descriptor pattern)";
       tensors[i] = operands[i].descriptor;
       ICHECK_EQ(operands[i].rank, 2U)
           << op_name << " requires rank-2 output, param, and index buffers";

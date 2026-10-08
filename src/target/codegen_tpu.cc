@@ -706,6 +706,7 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           op_name == "tl.tpu.add_scalar" || op_name == "tl.tpu.mul_scalar" ||
           op_name == "tl.tpu.rsqrt" || op_name == "tl.tpu.reduce_sum" ||
           op_name == "tl.tpu.reduce_max" || op_name == "tl.tpu.exp" ||
+          op_name == "tl.tpu.dq2" || op_name == "tl.tpu.scatter" ||
           op_name == "tl.tpu.embedding";
       ICHECK(is_supported_portable_op)
           << "Unknown backend-neutral TPU operation " << op_name;

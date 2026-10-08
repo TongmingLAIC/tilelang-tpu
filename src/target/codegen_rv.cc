@@ -491,5 +491,44 @@ void CodeGenTileLangTPU::EmitRVExp(const std::string &dst,
   stream << "rvt_fmul(8, 10, 9);\nrvt_fmul(8, 8, 8);\n";
 }
 
+void CodeGenTileLangTPU::EmitRVScatter(const std::string &dst,
+                                       const std::string &src,
+                                       const std::string &index,
+                                       DataType dtype) {
+  // KV-cache write: scatter local rows into the paged cache at the slots named
+  // by `index`.  The sequence is transcribed from the RV lowering of
+  // `examples/cxx/llm/paged_attention_multicore.pl`, which emits exactly:
+  //
+  //   rvt_gr(34, .., cache.addr, CONTINUOUS_LAYOUT, .., (int *)NULL);
+  //   rvt_tr(9,  .., rows.addr,  FREE_LAYOUT,      .., &rows.stride);
+  //   rvt_tr(8,  .., table.addr, FREE_LAYOUT,      .., &table.stride);
+  //   { uint64_t zero = 0; rvt_cfg_dmaidx(0, &zero); }
+  //   rvt_dma_fhscatter(34, 9, 8, 0, 0);
+  //
+  // Note the three different descriptor shapes: the destination is a global
+  // tensor under CONTINUOUS_LAYOUT with computed strides, while source and index
+  // table are local tiles under FREE_LAYOUT with explicit strides -- hence
+  // EmitRVDescriptor(..., hw_aligned=false) for the two local operands and a
+  // hand-rolled descriptor for the global one.
+  const auto type = RVDTypeName(dtype);
+  PrintIndent();
+  stream << "rvt_gr(34, PRECISION(" << type << "), FP8TYPE(" << type << "), "
+         << dst << ".addr, CONTINUOUS_LAYOUT, (array4_t){.n=" << dst
+         << ".shape.n, .c=" << dst << ".shape.c, .h=" << dst << ".shape.h, .w="
+         << dst << ".shape.w}, (int *)NULL);\n";
+  EmitRVDescriptor(src, 9, false, type, false);
+  EmitRVDescriptor(index, 8, false, "DT_UINT32", false);
+  PrintIndent();
+  stream << "{\n";
+  PrintIndent();
+  stream << "uint64_t rv_scatter_zero = 0;\n";
+  PrintIndent();
+  stream << "rvt_cfg_dmaidx(0, &rv_scatter_zero);\n";
+  PrintIndent();
+  stream << "}\n";
+  PrintIndent();
+  stream << "rvt_dma_fhscatter(34, 9, 8, 0, 0);\n";
+}
+
 } // namespace codegen
 } // namespace tvm

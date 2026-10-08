@@ -753,6 +753,129 @@ def ppl_rsqrt(out, inp):
     return T.call_extern("handle", "tl.tpu.rsqrt", outptr, inpptr)
 
 
+def ppl_dq2(out, src_packed, offset_scale, gsize):
+    """Dequantize 4-bit packed weights: `out = (src - offset) * scale`, per group.
+
+    This is the W4A16 / GPTQ weight path -- the dequantize step that
+    `matmul_gptq_forward` and `llama_mlp_gptq_forward` perform in torch-tpu.
+
+    Args:
+        out: FP16 or BF16 destination tile, shape `(N, K)`.
+        src_packed: UINT8 tile of shape `(N, K // 2)`.  Each byte carries two
+            4-bit weights with the **low nibble first**, matching `input_reorder`
+            in the PPL reference `examples/cxx/matmul/w4a16_matmul_dq2.py`.  The
+            instruction consumes it as `DT_UINT4` over `K` elements, so the
+            descriptor is emitted with twice this tile's W extent.
+        offset_scale: UINT32 tile of shape `(N, K // gsize)`.  Each 32-bit word
+            packs two FP16 halves: **low 16 bits are the offset (zero-point),
+            high 16 bits are the scale**.  This is what the PPL manual specifies
+            for `dq2`, and it matches `scale_zp_reorder` in the reference above.
+        gsize: group size in elements.  `K % gsize` must be zero.
+
+    Semantics source:
+        `PPL 开发参考手册` section 4.6 (`ppl::tiu::dq2`) plus the RV signature
+        `rvt_dq2(uint64_t out, uint64_t a, uint64_t scale, uint64_t _gsize)`.
+
+    Dtype support:
+        - dst (`out`): FP16, BF16.
+        - src (`src_packed`): 4-bit packed, stored as UINT8.
+
+    Backend support:
+        - RV Tensor: `rvt_dq2(out, a, scale, gsize)`.
+        - TPU-Kernel: **not available**.  That layer exposes only the fused
+          `tpu_bdc_fp_dq2_mm2_nt/tt` forms -- there is no standalone dequantize
+          instruction to lower to.  This is also why `ppl-compile` rejects the
+          PPL-level `tiu::dq2` on this chip: the unfused form has no lowering.
+    """
+    for name, buffer in (("out", out), ("src", src_packed),
+                         ("offset_scale", offset_scale)):
+        _require_local_buffer(name, buffer)
+    _require_dtype("out", out, {"float16", "bfloat16"})
+    _require_dtype("src", src_packed, {"uint8"})
+    _require_dtype("offset_scale", offset_scale, {"uint32"})
+    _require_rank("out", out, 2)
+    _require_rank("src", src_packed, 2)
+    _require_rank("offset_scale", offset_scale, 2)
+    _require_distinct_storage("ppl_dq2", out=out, src=src_packed,
+                              offset_scale=offset_scale)
+    _require_descriptor_shape("ppl_dq2 out", out)
+    _require_descriptor_shape("ppl_dq2 src", src_packed)
+    _require_descriptor_shape("ppl_dq2 offset_scale", offset_scale)
+    group_size = _static_positive_dim("ppl_dq2 gsize", gsize)
+
+    out_n = _static_positive_dim("ppl_dq2 out N", out.shape[0])
+    out_k = _static_positive_dim("ppl_dq2 out K", out.shape[1])
+    src_n = _static_positive_dim("ppl_dq2 src N", src_packed.shape[0])
+    src_w = _static_positive_dim("ppl_dq2 src W", src_packed.shape[1])
+    scale_n = _static_positive_dim("ppl_dq2 offset_scale N", offset_scale.shape[0])
+    scale_w = _static_positive_dim("ppl_dq2 offset_scale W", offset_scale.shape[1])
+
+    if src_w * 2 != out_k:
+        raise ValueError("ppl_dq2 src holds two 4-bit weights per byte, so its W "
+                         f"extent must be half of out's: got src W={src_w}, "
+                         f"out W={out_k}")
+    if out_k % group_size != 0:
+        raise ValueError("ppl_dq2 requires gsize to divide K, got "
+                         f"gsize={group_size}, K={out_k}")
+    if scale_w != out_k // group_size:
+        raise ValueError("ppl_dq2 offset_scale must carry one packed word per "
+                         f"group: expected W={out_k // group_size}, got "
+                         f"{scale_w}")
+    if src_n != out_n or scale_n != out_n:
+        raise ValueError("ppl_dq2 requires out, src, and offset_scale to share "
+                         "the same N extent")
+
+    outptr = _tpu_tensor_region(out, "w")
+    srcptr = _tpu_tensor_region(src_packed, "r")
+    scaleptr = _tpu_tensor_region(offset_scale, "r")
+    return T.call_extern("handle", "tl.tpu.dq2", outptr, srcptr, scaleptr,
+                         group_size)
+
+
+def ppl_scatter(dst, src, index):
+    """Scatter rows into a global tensor using an index table.
+
+    This is the KV-cache write in paged attention: a local tile of freshly
+    computed K (or V) rows is written into the paged cache at the slots named by
+    the index table.
+
+    Reference: `examples/cxx/llm/paged_attention_multicore.pl` and its RV
+    lowering, which emits
+
+        rvt_gr(34, .., in_kcache_save.addr, CONTINUOUS_LAYOUT, .., (int *)NULL);
+        rvt_tr(9,  .., k_tensor.addr,       FREE_LAYOUT, .., &k_tensor.stride);
+        rvt_tr(8,  .., save_tbl.addr,       FREE_LAYOUT, .., &save_tbl.stride);
+        { uint64_t zero = 0; rvt_cfg_dmaidx(0, &zero); }
+        rvt_dma_fhscatter(34, 9, 8, 0, 0);
+
+    Note the three different descriptor shapes: the destination is a *global*
+    tensor under CONTINUOUS_LAYOUT with computed strides, while source and index
+    table are local tiles under FREE_LAYOUT with explicit strides.
+
+    Args:
+        dst: FP16 global tensor -- the paged K or V cache.
+        src: FP16 local tile holding the rows to write.
+        index: UINT32 local tile naming the destination slot of each row.
+
+    Backend support:
+        - RV Tensor: `rvt_dma_fhscatter` + `rvt_cfg_dmaidx`.
+        - TPU-Kernel: not implemented.
+    """
+    _require_global_buffer("dst", dst)
+    _require_local_buffer("src", src)
+    _require_local_buffer("index", index)
+    _require_dtype("dst", dst, {"float16", "bfloat16"})
+    _require_dtype("src", src, {"float16", "bfloat16"})
+    _require_dtype("index", index, {"uint32"})
+    _require_same_dtype("ppl_scatter", dst, src)
+    _require_distinct_storage("ppl_scatter", dst=dst, src=src, index=index)
+
+    dstptr = _tpu_tensor_region(dst, "w")
+    srcptr = _tpu_tensor_region(src, "r")
+    idxptr = _tpu_tensor_region(index, "r")
+    return T.call_extern("handle", "tl.tpu.scatter", dstptr, srcptr, idxptr)
+
+
 def ppl_add_C(out, inp1, value):
     """Compute elementwise scalar add `out = inp1 + value`.
 
@@ -999,6 +1122,6 @@ def ppl_embedding(out, weight, indices):
     No padding index, negative indexing, or training gradient is implied.
     """
     param_h = _static_positive_dim("ppl_embedding weight axis 0", weight.shape[0])
-    outptr, weightptr, indexptr = _prepare_row_gather("ppl_embedding", out, weight, indices,
-                                                      param_h)
+    outptr, weightptr, indexptr = _prepare_row_gather(
+        "ppl_embedding", out, weight, indices, param_h)
     return T.call_extern("handle", "tl.tpu.embedding", outptr, weightptr, indexptr, param_h)
