@@ -159,7 +159,6 @@ python testing/python/jit/tpu_demo_ops_matrix.py \
 }
 ```
 
-**整个过程不需要我方参与，也不需要改动任何代码。**
 
 ### 当前状态（改之前）
 
@@ -232,6 +231,3 @@ python testing/python/jit/tpu_demo_ops_matrix.py \
 | `paged-attention.float16` | ✅ passed | 0/256 | 1.2e-4 | 2e-2 |
 | `paged-attention.bfloat16` | ✅ passed | 0/256 | 9.8e-4 | 2e-2 |
 
-> **两个容易混淆的对应关系**：
-> `swiglu/` **不是**算子二 —— 它只是 MLP 里的 SwiGLU 激活，没有 gate/up/down 三个投影。
-> `flashattn/` **不是**算子四 —— 那个是非分页的，没有 KV cache 和 block table。
