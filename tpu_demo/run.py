@@ -47,6 +47,12 @@ def run_case(case_id: str,
     if case.operation == "flashattn":
         from tpu_demo.flashattn import run
         return run(variant=case.variant, is_causal=case.is_causal, **common)
+    if case.operation == "paged-attention":
+        from tpu_demo.paged_attention import run
+        return run(**common)
+    if case.operation == "llama-mlp":
+        from tpu_demo.llama_mlp import run
+        return run(**common)
     if case.operation == "gptq-w4a16":
         # Returns a payload with `status` either "passed" or "unsupported";
         # a target without the dequantize lowering reports the latter rather

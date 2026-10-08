@@ -30,6 +30,8 @@ OPERATIONS = (
     "rope",
     "swiglu",
     "flashattn",
+    "llama-mlp",
+    "paged-attention",
     "gptq-w4a16",
 )
 # `gptq-w4a16` is listed here even though no current target lowers it.  The
@@ -44,6 +46,12 @@ OPERATION_DTYPES = {
 # W4A16 dequantizes into a half-precision weight, so only FP16 and BF16 are
 # meaningful outputs; FP8 and FP32 would be exercising a different operator.
 OPERATION_DTYPES["gptq-w4a16"] = ("float16", "bfloat16")
+# The MLP's GEMMs use the regular local layout, which the FP32 matrix path does
+# not accept, and FP8 has no exp lowering on RV.
+OPERATION_DTYPES["llama-mlp"] = ("float16", "bfloat16")
+# Same reason: attention's GEMMs and softmax are evaluated in FP32 internally
+# but the cache and query tensors are half precision.
+OPERATION_DTYPES["paged-attention"] = ("float16", "bfloat16")
 
 
 def kernel_variant(operation: str, dtype: str, programming_model: str) -> str:
@@ -73,6 +81,10 @@ def kernel_variant(operation: str, dtype: str, programming_model: str) -> str:
         return f"flashattn_{precision}"
     if operation == "rope":
         return "rope"
+    if operation == "llama-mlp":
+        return "llama_mlp"
+    if operation == "paged-attention":
+        return "paged_attention"
     if operation == "gptq-w4a16":
         return "gptq_w4a16"
     raise AssertionError(f"unhandled TPU demo operation: {operation}")
