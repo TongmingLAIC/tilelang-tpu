@@ -876,6 +876,52 @@ def ppl_scatter(dst, src, index):
     return T.call_extern("handle", "tl.tpu.scatter", dstptr, srcptr, idxptr)
 
 
+@T.macro
+def _scatter_add_impl(dst, src, indices, dim):
+    # Separate C=1 tiles keep both operands in the same NPU lane. A (2, W)
+    # tile distributes the rows across lanes and cannot supply a TIU add by
+    # treating the second row as a linear stride.c offset.
+    accumulator = T.alloc_shared((1, src.shape[1]), src.dtype)
+    source_row = T.alloc_shared((1, src.shape[1]), src.dtype)
+    T.call_extern("handle", "tl.tpukernel.scatter_add", _tpu_tensor_region(dst, "rw"),
+                  _tpu_tensor_region(src, "r"), _tpu_tensor_region(indices, "r"),
+                  _tpu_tensor_region(accumulator, "rw"), _tpu_tensor_region(source_row, "rw"), dim)
+
+
+def ppl_scatter_add(dst, src, indices, dim=0):
+    """Accumulate global rows as ``dst[indices[i]] += src[i]``.
+
+    All public operands are contiguous rank-2 global buffers. Source and
+    destination payloads must have the same FP16, BF16, or FP32 dtype and row
+    width. Indices have shape ``(src.shape[0], 1)`` and use INT32 or UINT32;
+    callers must keep every index in ``[0, dst.shape[0])``. Only ``dim=0`` is
+    supported. Duplicate indices accumulate in source-row order onto the
+    existing destination values. All three buffers must use distinct storage.
+
+    This TPU-Kernel-only composite allocates two local row tiles internally.
+    """
+    for name, buffer in (("dst", dst), ("src", src), ("indices", indices)):
+        _require_global_buffer(name, buffer)
+        _require_rank(name, buffer, 2)
+        _require_descriptor_shape(f"ppl_scatter_add {name}", buffer)
+    _require_dtype("dst", dst, _TPU_BASE_FLOAT_DTYPES)
+    _require_same_dtype("ppl_scatter_add payload", dst, src)
+    _require_dtype("indices", indices, {"int32", "uint32"})
+    _require_distinct_storage("ppl_scatter_add", dst=dst, src=src, indices=indices)
+    if isinstance(dim, bool) or not isinstance(dim, int):
+        raise TypeError("ppl_scatter_add dim must be a Python integer")
+    if dim != 0:
+        raise ValueError(f"ppl_scatter_add only supports dim=0, got {dim}")
+    try:
+        ir.assert_structural_equal(dst.shape[1], src.shape[1])
+        ir.assert_structural_equal(src.shape[0], indices.shape[0])
+        ir.assert_structural_equal(indices.shape[1], 1)
+    except ValueError as error:
+        raise ValueError("ppl_scatter_add expects dst=(rows, width), src=(count, width), "
+                         "and indices=(count, 1)") from error
+    return _scatter_add_impl(dst, src, indices, dim)
+
+
 def ppl_add_C(out, inp1, value):
     """Compute elementwise scalar add `out = inp1 + value`.
 

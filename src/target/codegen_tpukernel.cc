@@ -542,6 +542,118 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
         << " has only an RV lowering; build with -tpu-programming-model=rv";
     EmitRVScatter(dst_operand.descriptor, src_operand.descriptor,
                   idx_operand.descriptor, dst_operand.dtype);
+  } else if (op_name == "tl.tpukernel.scatter_add") {
+    ICHECK_EQ(target_programming_model_, "tpukernel")
+        << op_name << " requires target tpu-programming-model=tpukernel";
+    ICHECK_EQ(op->args.size(), 7U)
+        << op_name << " expects dst, src, indices, two local row tiles, and dim";
+    constexpr std::array<int, 5> kAccessMasks = {3, 1, 1, 3, 3};
+    std::array<SemanticTensorOperand, 5> operands{};
+    for (size_t i = 0; i < operands.size(); ++i) {
+      operands[i] = ParseWholeBufferRegion(
+          op->args[i + 1], op_name + " operand " + std::to_string(i),
+          kAccessMasks[i]);
+      ICHECK_EQ(operands[i].rank, 2U)
+          << op_name << " requires rank-2 buffers";
+      ICHECK_EQ(operands[i].is_local, i >= 3)
+          << op_name << " requires global dst/src/indices and local row tiles";
+      for (size_t j = 0; j < i; ++j) {
+        ICHECK(operands[i].data_var != operands[j].data_var)
+            << op_name << " requires distinct storage for every operand";
+      }
+    }
+    const auto *dim = op->args[6].as<IntImmNode>();
+    ICHECK(dim && dim->dtype.is_int() && dim->value == 0)
+        << op_name << " only supports compile-time dim=0";
+    const DataType dtype = operands[0].dtype;
+    ICHECK(dtype == DataType::Float(16) || dtype == DataType::BFloat(16) ||
+           dtype == DataType::Float(32))
+        << op_name << " supports only FP16, BF16, and FP32 payloads";
+    ICHECK_EQ(operands[1].dtype, dtype)
+        << op_name << " requires matching dst/src dtypes";
+    ICHECK(operands[2].dtype == DataType::Int(32) ||
+           operands[2].dtype == DataType::UInt(32))
+        << op_name << " requires INT32 or UINT32 indices";
+    const int rows = operands[1].shape4[1];
+    const int width = operands[1].shape4[3];
+    ICHECK_EQ(operands[0].shape4[3], width)
+        << op_name << " requires matching dst/src row widths";
+    ICHECK_EQ(operands[2].shape4[1], rows)
+        << op_name << " requires one index per source row";
+    ICHECK_EQ(operands[2].shape4[3], 1)
+        << op_name << " indices must have shape (count, 1)";
+    for (size_t i = 3; i < operands.size(); ++i) {
+      ICHECK_EQ(operands[i].dtype, dtype)
+          << op_name << " row tiles must match the payload dtype";
+      ICHECK(operands[i].shape4 == std::vector<int>({1, 1, 1, width}))
+          << op_name << " local row tiles must have shape (1, width)";
+    }
+    constexpr int64_t kLocalMemBytes =
+        tl::tpuv7::kBankNum * tl::tpuv7::kBankSize;
+    ICHECK_EQ(buffer_addrs_.at(operands[3].data_var) / kLocalMemBytes,
+              buffer_addrs_.at(operands[4].data_var) / kLocalMemBytes)
+        << op_name << " local row tiles must start in the same NPU lane";
+
+    const std::string &dst = operands[0].descriptor;
+    const std::string &src = operands[1].descriptor;
+    const std::string &indices = operands[2].descriptor;
+    const std::string &accumulator = operands[3].descriptor;
+    const std::string &source_row = operands[4].descriptor;
+    const std::string dtype_name = TPUKernelDTypeName(dtype);
+    const int64_t bytes = tl::tpuv7::DTypeBytes(dtype);
+    const std::string destination_shape = name_supply_->FreshName("scatter_dst_shape");
+    const std::string destination_stride = name_supply_->FreshName("scatter_dst_stride");
+    const std::string row_shape = name_supply_->FreshName("scatter_row_shape");
+    const std::string row = name_supply_->FreshName("scatter_i");
+    this->PrintIndent();
+    this->stream << "{\n";
+    this->PrintIndent();
+    this->stream << "dim4 " << destination_shape << " = {1, 1, "
+                 << operands[0].shape4[1] << ", " << width << "};\n";
+    this->PrintIndent();
+    this->stream << "dim4 " << destination_stride << " = {"
+                 << static_cast<int64_t>(operands[0].shape4[1]) * width
+                 << ", "
+                 << static_cast<int64_t>(operands[0].shape4[1]) * width
+                 << ", " << width << ", 1};\n";
+    this->PrintIndent();
+    this->stream << "dim4 " << row_shape << " = {1, 1, 1, " << width << "};\n";
+    this->PrintIndent();
+    this->stream << "for (int " << row << " = 0; " << row << " < " << rows
+                 << "; ++" << row << ") {\n";
+    this->PrintIndent();
+    this->stream << "  tpu_gdma_cpy_S2L(" << source_row << ".addr, " << src
+                 << ".addr + (global_addr_t)" << row << " * " << width * bytes
+                 << ", &" << row_shape << ", &" << source_row
+                 << ".stride, NULL, " << dtype_name << ");\n";
+    this->PrintIndent();
+    this->stream << "  tpu_gdma_h_gather_S2L(" << accumulator << ".addr, "
+                 << dst << ".addr, " << indices
+                 << ".addr + (global_addr_t)" << row << " * 4, false, "
+                    "(scalar_t){.u32 = 0}, &" << row_shape << ", "
+                 << operands[0].shape4[1] << ", &" << accumulator
+                 << ".stride, &" << destination_stride << ", NULL, " << dtype_name
+                 << ");\n";
+    this->PrintIndent();
+    this->stream << "  tpu_bdc_fp_add(" << accumulator << ".addr, "
+                 << accumulator << ".addr, " << source_row
+                 << ".addr, &" << row_shape << ", &" << accumulator
+                 << ".stride, &" << accumulator << ".stride, &" << source_row
+                 << ".stride, " << dtype_name << ");\n";
+    this->PrintIndent();
+    this->stream << "  tpu_gdma_h_scatter_L2S(" << dst << ".addr, "
+                 << accumulator << ".addr, " << indices
+                 << ".addr + (global_addr_t)" << row << " * 4, false, &"
+                 << destination_shape << ", 1, &" << destination_stride << ", &"
+                 << accumulator << ".stride, NULL, " << dtype_name << ");\n";
+    // The next row may gather this same destination index and reuse both
+    // scratch tiles. Complete the update before that read-modify-write cycle.
+    this->PrintIndent();
+    this->stream << "  tpu_poll();\n";
+    this->PrintIndent();
+    this->stream << "}\n";
+    this->PrintIndent();
+    this->stream << "}\n";
   } else if (op_name == "tl.tpu.reduce_max") {
     ICHECK_EQ(op->args.size(), 7U)
         << op_name

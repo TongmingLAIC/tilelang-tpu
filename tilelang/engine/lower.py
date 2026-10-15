@@ -97,6 +97,7 @@ _PORTABLE_TPU_EXTERNS = frozenset({
 })
 _TPUKERNEL_EXTERNS = frozenset({
     "tl.tpukernel.gather",
+    "tl.tpukernel.scatter_add",
     "tl.tpukernel.topk",
 })
 
@@ -118,6 +119,7 @@ _TPU_SEMANTIC_REGION_ARGS = {
     "tl.tpu.mul_scalar": (1, 2),
     "tl.tpu.exp": (1, 2, 3, 4),
     "tl.tpukernel.gather": (1, 2, 3),
+    "tl.tpukernel.scatter_add": (1, 2, 3, 4, 5),
     "tl.tpukernel.topk": (1, 2, 3),
     "tl.tpu.rsqrt": (1, 2),
     "tl.tpu.reduce_sum": (1, 2, 3),
