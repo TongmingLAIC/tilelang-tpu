@@ -96,13 +96,100 @@ _PORTABLE_TPU_EXTERNS = frozenset({
 _TPUKERNEL_EXTERNS = frozenset({
     "tl.tpukernel.gather",
     "tl.tpukernel.topk",
+    "tl.tpukernel.parallel_start",
+    "tl.tpukernel.parallel_end",
 })
+
+_TPUKERNEL_PARALLEL_MARKERS = frozenset({
+    "tl.tpukernel.parallel_start",
+    "tl.tpukernel.parallel_end",
+})
+
+
+def _validate_tpukernel_parallel_structure(body, target, function_name):
+    """Keep command groups balanced on every control-flow path.
+
+    The current low-level TPU-Kernel interface supports groups inside a loop,
+    but each loop iteration must open and close its own group.  Markers inside
+    conditional arms are rejected; ordinary operations may still branch
+    between an unconditional start/end pair.  This deliberately avoids
+    assigning speculative command semantics to general control flow.
+    """
+
+    def marker_name(node):
+        if not isinstance(node, tir.Call) or getattr(node.op, "name", None) != "tir.call_extern":
+            return None
+        name = getattr(node.args[0], "value", None) if node.args else None
+        return name if name in _TPUKERNEL_PARALLEL_MARKERS else None
+
+    def has_marker(node):
+        found = False
+
+        def visit(candidate):
+            nonlocal found
+            if marker_name(candidate) is not None:
+                found = True
+
+        tir.stmt_functor.post_order_visit(node, visit)
+        return found
+
+    def error(message):
+        raise _tpu_contract_error(target, function_name, "parallel-command-group", message)
+
+    def walk(stmt, opened):
+        if isinstance(stmt, tir.SeqStmt):
+            for part in stmt.seq:
+                opened = walk(part, opened)
+            return opened
+        if isinstance(stmt, tir.Evaluate):
+            name = marker_name(stmt.value)
+            if name is None:
+                if has_marker(stmt.value):
+                    error("parallel markers must be standalone statements")
+                return opened
+            if len(stmt.value.args) != 1:
+                error(f"{name} takes no operands")
+            if name.endswith("parallel_start"):
+                if opened:
+                    error("nested parallel command groups are unsupported")
+                return True
+            if not opened:
+                error("parallel_end has no matching parallel_start")
+            return False
+        if isinstance(stmt, tir.IfThenElse):
+            if has_marker(stmt):
+                error("parallel start/end markers may not be conditional")
+            return opened
+        if isinstance(stmt, (tir.For, tir.While)):
+            if opened:
+                error("loops inside a parallel command group are unsupported")
+            if walk(stmt.body, False):
+                error("a loop iteration leaves a parallel command group open")
+            return opened
+        if isinstance(stmt, tir.BlockRealize):
+            return walk(stmt.block, opened)
+        if isinstance(stmt, tir.Block):
+            if stmt.init is not None and has_marker(stmt.init):
+                error("parallel markers in block initialization are unsupported")
+            return walk(stmt.body, opened)
+        if isinstance(stmt, (tir.Allocate, tir.AllocateConst, tir.DeclBuffer,
+                             tir.LetStmt, tir.AttrStmt, tir.AssertStmt,
+                             tir.BufferRealize)):
+            return walk(stmt.body, opened)
+        if has_marker(stmt):
+            error(f"parallel markers under {type(stmt).__name__} are unsupported")
+        return opened
+
+    if walk(body, False):
+        error("parallel_start has no matching parallel_end")
 
 # Exact tensor-region argument positions in the compiler-owned semantic ABI.
 # Scalar/attribute arguments are intentionally absent.  Keeping this table
 # closed prevents an arbitrary nested ``tl.region`` from becoming a residual
 # BufferLoad escape hatch merely because it appears under a known extern.
 _TPU_SEMANTIC_REGION_ARGS = {
+    "tl.tpukernel.parallel_start": (),
+    "tl.tpukernel.parallel_end": (),
     "tl.tpu.embedding": (1, 2, 3),
     "tl.tpu.copy": (1, 2),
     "tl.tpu.fill": (1,),
@@ -277,6 +364,10 @@ def _validate_tpu_residual_ir(mod: tvm.IRModule, target: Target, tpu_config) -> 
 
         tir.stmt_functor.post_order_visit(function.body, collect_extern_model)
 
+        if any(name in _TPUKERNEL_PARALLEL_MARKERS
+               for name in externs_by_model.get("tpukernel", ())):
+            _validate_tpukernel_parallel_structure(function.body, target, function_name)
+
         if (tpu_config.chip == "sg2260e" and
                 "tl.tpukernel.topk" in externs_by_model.get("tpukernel", ())):
             raise _tpu_contract_error(
@@ -346,7 +437,7 @@ def _validate_tpu_residual_ir(mod: tvm.IRModule, target: Target, tpu_config) -> 
                 return
             extern_name = getattr(node.args[0], "value", None)
             positions = _TPU_SEMANTIC_REGION_ARGS.get(extern_name)
-            if positions is None or len(node.args) <= positions[-1]:
+            if not positions or len(node.args) <= positions[-1]:
                 return
             regions = [node.args[position] for position in positions]
             if any(not isinstance(region, tir.Call) or

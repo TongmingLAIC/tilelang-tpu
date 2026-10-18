@@ -249,6 +249,40 @@ def test_tpu_residual_ir_allows_only_owned_semantic_and_model_raw_externs():
     _assert_contract_error(raw_rv, "call_extern", "different programming model", "tpukernel")
 
 
+def _parallel_marker(name):
+    return tir.Evaluate(tir.call_extern("handle", f"tl.tpukernel.parallel_{name}"))
+
+
+def test_tpukernel_parallel_group_accepts_balanced_loop_and_rejects_rv():
+    step = tir.Var("step", "int32")
+    body = tir.For(step, 0, 4, tir.ForKind.SERIAL,
+                   tir.SeqStmt([_parallel_marker("start"), tir.Evaluate(0),
+                                _parallel_marker("end")]))
+    function = _prim_func(body, "balanced_parallel")
+    lower_module.validate_target_module_contract(
+        tvm.IRModule({"balanced_parallel": function}), _target("tpukernel"))
+    _assert_contract_error(function, "call_extern", "different programming model", "rv")
+
+
+@pytest.mark.parametrize("body,detail", [
+    (_parallel_marker("start"), "no matching parallel_end"),
+    (_parallel_marker("end"), "no matching parallel_start"),
+    (tir.SeqStmt([_parallel_marker("start"), _parallel_marker("start"),
+                  _parallel_marker("end")]), "nested parallel"),
+    (tir.IfThenElse(tir.IntImm("bool", 1), _parallel_marker("start"), None),
+     "may not be conditional"),
+    (tir.For(tir.Var("step", "int32"), 0, 2, tir.ForKind.SERIAL,
+             _parallel_marker("start")), "loop iteration leaves"),
+    (tir.SeqStmt([_parallel_marker("start"),
+                  tir.For(tir.Var("step", "int32"), 0, 2,
+                          tir.ForKind.SERIAL, tir.Evaluate(0)),
+                  _parallel_marker("end")]), "loops inside a parallel"),
+])
+def test_tpukernel_parallel_group_rejects_unbalanced_control_flow(body, detail):
+    _assert_contract_error(_prim_func(body, "invalid_parallel"),
+                           "parallel-command-group", detail)
+
+
 def test_tpu_shared_allocation_is_not_confused_with_gpu_synchronization():
     data = tir.Var("local_data", tvm.ir.PointerType(tvm.ir.PrimType("float32"), "shared.dyn"))
     allocation = tir.Allocate(

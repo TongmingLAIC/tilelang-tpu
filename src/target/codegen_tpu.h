@@ -197,6 +197,7 @@ private:
   int rvt_direct_call_count_{0};
   int tpukernel_extern_count_{0};
   int canonical_tpu_op_count_{0};
+  int tpukernel_parallel_depth_{0};
   std::string target_chip_;
   std::string target_programming_model_;
 

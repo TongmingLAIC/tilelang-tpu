@@ -29,6 +29,12 @@ _PORTABLE_EXTERNS = {
 _TPUKERNEL_EXTERNS = {
     "tl.tpukernel.gather",
     "tl.tpukernel.topk",
+    "tl.tpukernel.parallel_start",
+    "tl.tpukernel.parallel_end",
+}
+_TPUKERNEL_COMMAND_EXTERNS = {
+    "tl.tpukernel.parallel_start",
+    "tl.tpukernel.parallel_end",
 }
 _PORTABLE_IMPLEMENTED_IN_TPUKERNEL = {
     "tl.tpu.embedding",
@@ -63,9 +69,11 @@ def test_semantic_extern_registry_is_isomorphic_across_compiler_layers():
     assert _semantic_externs("tilelang/language/customize.py") == expected
     assert _semantic_externs("tilelang/engine/lower.py") == expected
     assert _semantic_externs("src/transform/address_assign.cc") == expected
-    assert _semantic_externs("src/target/codegen_tpu.cc") == _PORTABLE_EXTERNS
+    assert _semantic_externs("src/target/codegen_tpu.cc") == (
+        _PORTABLE_EXTERNS | _TPUKERNEL_COMMAND_EXTERNS)
     assert _semantic_externs("src/target/codegen_tpukernel.cc") == (
-        _TPUKERNEL_EXTERNS | _PORTABLE_IMPLEMENTED_IN_TPUKERNEL)
+        (_TPUKERNEL_EXTERNS - _TPUKERNEL_COMMAND_EXTERNS) |
+        _PORTABLE_IMPLEMENTED_IN_TPUKERNEL)
 
 
 def test_every_semantic_extern_has_exact_region_operand_positions():
@@ -76,3 +84,5 @@ def test_every_semantic_extern_has_exact_region_operand_positions():
     assert all(
         tuple(indices) == tuple(range(1,
                                       len(indices) + 1)) for indices in positions.values())
+    assert positions["tl.tpukernel.parallel_start"] == ()
+    assert positions["tl.tpukernel.parallel_end"] == ()

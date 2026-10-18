@@ -421,6 +421,22 @@ def ppl_copy(
     return T.call_extern("handle", "tl.tpu.copy", src, dst)
 
 
+def tpukernel_parallel_start():
+    """Begin a TPU-Kernel parallel command group.
+
+    This is a low-level scheduling primitive.  The caller must keep every
+    buffer read or written by concurrent DMA/TIU commands distinct and place
+    a matching ``tpukernel_parallel_end`` on the same control-flow path.
+    It is deliberately unavailable for the RV programming model.
+    """
+    return T.call_extern("handle", "tl.tpukernel.parallel_start")
+
+
+def tpukernel_parallel_end():
+    """End the current TPU-Kernel parallel command group."""
+    return T.call_extern("handle", "tl.tpukernel.parallel_end")
+
+
 def ppl_fill(buffer, value):
     """Fill a local/shared tile with a scalar constant.
 

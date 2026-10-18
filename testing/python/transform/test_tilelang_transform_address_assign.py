@@ -3,6 +3,8 @@
 
 import contextlib
 import io
+import itertools
+import random
 
 import pytest
 
@@ -53,6 +55,110 @@ def _raw_local_allocations(*, data_names, buffer_names=None):
         body = tvm.tir.Allocate(data, "float32", [32], tvm.tir.IntImm("bool", 1),
                                 tvm.tir.DeclBuffer(buffer, body))
     return tvm.tir.PrimFunc([], body).with_attr("global_symbol", "main")
+
+
+def _pressure_module(sizes, access_groups, symbol="main", access_repetitions=None):
+    """Build opaque accesses so AddressAssign conservatively infers conflicts."""
+    buffers = {}
+    for name, size in sizes.items():
+        pointer_type = tvm.ir.PointerType(tvm.ir.PrimType("float32"), "shared")
+        data = tvm.tir.Var(name, pointer_type)
+        buffers[name] = tvm.tir.decl_buffer(
+            (size // 4,), "float32", name=name, data=data, scope="shared")
+    repetitions = access_repetitions or [1] * len(access_groups)
+    assert len(repetitions) == len(access_groups)
+    statements = []
+    for index, (group, repeat) in enumerate(zip(access_groups, repetitions)):
+        statement = tvm.tir.Evaluate(
+            tvm.tir.call_extern("handle", "research.conflict",
+                                *(buffers[name].data for name in group)))
+        if repeat != 1:
+            statement = tvm.tir.For(
+                tvm.tir.Var(f"repeat_{index}", "int32"), 0, repeat,
+                tvm.tir.ForKind.SERIAL, statement)
+        statements.append(statement)
+    body = statements[0] if len(statements) == 1 else tvm.tir.SeqStmt(statements)
+    for buffer in reversed(list(buffers.values())):
+        body = tvm.tir.Allocate(
+            buffer.data, buffer.dtype, list(buffer.shape), tvm.tir.IntImm("bool", 1),
+            tvm.tir.DeclBuffer(buffer, body))
+    function = tvm.tir.PrimFunc([], body).with_attr("global_symbol", symbol)
+    target = tvm.target.Target("tpu -mcpu=sg2260e -tpu-programming-model=rv")
+    return tvm.tir.transform.BindTarget(target)(tvm.IRModule({symbol: function})), sizes
+
+
+def _near_capacity_conflict_module():
+    """A deterministic complete conflict graph with awkward bank-sized gaps."""
+    sizes = {
+        "b0": 10240,
+        "b1": 22528,
+        "b2": 10240,
+        "b3": 34816,
+        "b4": 34816,
+        "b5": 34816,
+        "b6": 30720,
+        "b7": 18432,
+    }
+    return _pressure_module(sizes, list(itertools.combinations(sizes, 2)))
+
+
+def _greedy_failure_recovery_module():
+    seed = 4030
+    rng = random.Random(seed)
+    choices = (6144, 10240, 14336, 18432, 22528, 26624, 30720, 34816, 38912)
+    buffer_count = rng.randint(7, 12)
+    sizes = {f"b{index}": rng.choice(choices) for index in range(buffer_count)}
+    names = tuple(sizes)
+    accesses = [(name,) for name in names]
+    for _ in range(rng.randint(buffer_count * 2, buffer_count * 4)):
+        width = rng.randint(3, min(7, buffer_count))
+        accesses.append(tuple(rng.sample(names, width)))
+    return _pressure_module(sizes, accesses)
+
+
+def _assign_with_policy(module, policy=None, **extra_config):
+    config = {} if policy is None else {"tl.AddressAssignPolicy": policy}
+    config.update(extra_config)
+    with tvm.transform.PassContext(config=config):
+        return tilelang.transform.AddressAssign()(module)["main"]
+
+
+def test_parallel_command_group_extends_sequential_tir_uses_to_concurrent_lives():
+    """Two commands in one group may overlap even if their calls do not."""
+
+    def make_module(with_group):
+        buffers = {}
+        for name in ("first", "second"):
+            data = tvm.tir.Var(name, tvm.ir.PointerType(tvm.ir.PrimType("float32"), "shared"))
+            buffers[name] = tvm.tir.decl_buffer((32,), "float32", name=name,
+                                                data=data, scope="shared")
+        statements = []
+        if with_group:
+            statements.append(tvm.tir.Evaluate(tvm.tir.call_extern(
+                "handle", "tl.tpukernel.parallel_start")))
+        for name in buffers:
+            statements.append(tvm.tir.Evaluate(tvm.tir.call_extern(
+                "handle", "research.touch", buffers[name].data)))
+        if with_group:
+            statements.append(tvm.tir.Evaluate(tvm.tir.call_extern(
+                "handle", "tl.tpukernel.parallel_end")))
+        body = tvm.tir.SeqStmt(statements)
+        for buffer in reversed(tuple(buffers.values())):
+            body = tvm.tir.Allocate(
+                buffer.data, buffer.dtype, list(buffer.shape),
+                tvm.tir.IntImm("bool", 1), tvm.tir.DeclBuffer(buffer, body))
+        target = tvm.target.Target("tpu -mcpu=sg2260e -tpu-programming-model=tpukernel")
+        function = tvm.tir.PrimFunc([], body).with_attr("global_symbol", "main")
+        return tvm.tir.transform.BindTarget(target)(tvm.IRModule({"main": function}))
+
+    config = {"tl.AddressAssignEmitProblem": True}
+    serial = _assign_with_policy(make_module(False), "compact", **config)
+    parallel = _assign_with_policy(make_module(True), "compact", **config)
+    assert _addr(serial.attrs, "first") == _addr(serial.attrs, "second")
+    assert _addr(parallel.attrs, "first") != _addr(parallel.attrs, "second")
+    prefix = "tilelang.tpu.lmem.problem.buffer."
+    assert int(parallel.attrs[prefix + "0.start"]) == int(parallel.attrs[prefix + "1.start"])
+    assert int(parallel.attrs[prefix + "0.end"]) == int(parallel.attrs[prefix + "1.end"])
 
 
 def test_ppl_gemm_readwrite_accumulator_is_separated_from_both_inputs():
@@ -212,6 +318,193 @@ def test_address_assignment_rejects_duplicate_allocation_data_names():
     with pytest.raises(
             tvm.error.TVMError, match="unique local allocation data-variable names.*duplicate"):
         tilelang.transform.AddressAssign()(mod)
+
+
+def test_portfolio_address_policy_is_fail_safe_and_improves_the_pressure_case():
+    module, sizes = _near_capacity_conflict_module()
+    default = _assign_with_policy(module)
+    greedy = _assign_with_policy(module, "greedy")
+    beam = _assign_with_policy(module, "beam")
+    portfolio = _assign_with_policy(module, "portfolio")
+    agent = _assign_with_policy(module, "agent")
+
+    names = tuple(sizes)
+    assert [_addr(default.attrs, name) for name in names] == [
+        _addr(greedy.attrs, name) for name in names
+    ]
+    assert str(default.attrs["tilelang.tpu.lmem.statistics.policy"]) == "greedy"
+    assert str(beam.attrs["tilelang.tpu.lmem.statistics.policy"]) == "beam-search"
+    assert str(portfolio.attrs[
+        "tilelang.tpu.lmem.statistics.policy"]).startswith("portfolio-search-")
+    assert str(agent.attrs["tilelang.tpu.lmem.statistics.policy"]).startswith(
+        "agent-search-")
+    greedy_cost = int(greedy.attrs["tilelang.tpu.lmem.statistics.bank_conflicts"])
+    agent_cost = int(agent.attrs["tilelang.tpu.lmem.statistics.bank_conflicts"])
+    greedy_peak = int(greedy.attrs["tilelang.tpu.lmem.statistics.peak_bytes"])
+    agent_peak = int(agent.attrs["tilelang.tpu.lmem.statistics.peak_bytes"])
+    assert agent_cost <= greedy_cost
+    assert agent_peak < greedy_peak
+    assert [_addr(portfolio.attrs, name) for name in names] == [
+        _addr(agent.attrs, name) for name in names
+    ]
+
+    intervals = sorted((_addr(agent.attrs, name), _addr(agent.attrs, name) + sizes[name])
+                       for name in names)
+    assert all(lhs_end <= rhs_start
+               for (_, lhs_end), (rhs_start, _) in zip(intervals, intervals[1:]))
+
+
+def test_address_assignment_rejects_unknown_agent_policy():
+    module, _ = _near_capacity_conflict_module()
+    with pytest.raises(
+            tvm.error.TVMError,
+            match="policy must be 'greedy', 'compact', 'beam', 'portfolio'"):
+        _assign_with_policy(module, "unvalidated")
+
+
+def test_address_assignment_exports_and_replays_a_verified_problem():
+    module, sizes = _pressure_module(
+        {"a": 1024, "b": 2048}, [("a", "b")])
+    exported = _assign_with_policy(
+        module, "greedy", **{"tl.AddressAssignEmitProblem": True})
+    prefix = "tilelang.tpu.lmem.problem."
+
+    assert int(exported.attrs[prefix + "buffer_count"]) == 2
+    assert int(exported.attrs[prefix + "edge_count"]) == 1
+    names = [str(exported.attrs[prefix + f"buffer.{index}.name"])
+             for index in range(2)]
+    assert names == ["a", "b"]
+    assert [int(exported.attrs[prefix + f"buffer.{index}.size"])
+            for index in range(2)] == [sizes[name] for name in names]
+    assert int(exported.attrs[prefix + "edge.0.lhs"]) == 0
+    assert int(exported.attrs[prefix + "edge.0.rhs"]) == 1
+    assert int(exported.attrs[prefix + "edge.0.weight"]) == 1
+
+    replayed = _assign_with_policy(
+        module, "replay", **{"tl.AddressAssignReplayAddresses": "16384,0"})
+    assert str(replayed.attrs["tilelang.tpu.lmem.statistics.policy"]) == "replay"
+    assert _addr(replayed.attrs, "a") == 16384
+    assert _addr(replayed.attrs, "b") == 0
+
+
+    assert int(replayed.attrs[
+        "tilelang.tpu.lmem.statistics.explored_states"]) == 0
+
+    with pytest.raises(tvm.error.TVMError, match="overlapping live buffers"):
+        _assign_with_policy(
+            module, "replay", **{"tl.AddressAssignReplayAddresses": "0,0"})
+
+    with pytest.raises(tvm.error.TVMError, match="must be non-negative"):
+        _assign_with_policy(
+            module, "replay", **{"tl.AddressAssignReplayAddresses": "-64,0"})
+    with pytest.raises(tvm.error.TVMError, match="64-byte aligned"):
+        _assign_with_policy(
+            module, "replay", **{"tl.AddressAssignReplayAddresses": "1,0"})
+    with pytest.raises(tvm.error.TVMError, match="exceeds LMEM capacity"):
+        _assign_with_policy(
+            module, "replay", **{
+                "tl.AddressAssignReplayAddresses":
+                    "9223372036854775744,0",
+            })
+
+
+def test_analysis_only_exports_before_allocation_failure():
+    module, _ = _pressure_module(
+        {"a": 131072, "b": 131136}, [("a", "b")])
+    with pytest.raises(tvm.error.TVMError, match="allocation failed"):
+        _assign_with_policy(module, "greedy")
+
+    analyzed = _assign_with_policy(
+        module,
+        "greedy",
+        **{
+            "tl.AddressAssignEmitProblem": True,
+            "tl.AddressAssignAnalysisOnly": True,
+        },
+    )
+    prefix = "tilelang.tpu.lmem.problem."
+    assert int(analyzed.attrs[prefix + "buffer_count"]) == 2
+    assert [int(analyzed.attrs[prefix + f"buffer.{index}.size"])
+            for index in range(2)] == [131072, 131136]
+    assert not any(key.startswith(LMEM_ADDRESS_ATTR_PREFIX)
+                   for key in _attr_keys(analyzed.attrs))
+
+
+def test_agent_address_policy_recovers_a_greedy_allocation_failure():
+    module, _ = _greedy_failure_recovery_module()
+    with pytest.raises(tvm.error.TVMError, match="local memory allocation failed"):
+        _assign_with_policy(module, "greedy")
+    compact = _assign_with_policy(module, "compact")
+    beam = _assign_with_policy(module, "beam")
+    portfolio = _assign_with_policy(module, "portfolio")
+    agent = _assign_with_policy(module, "agent")
+    assert str(compact.attrs["tilelang.tpu.lmem.statistics.policy"]) == (
+        "compact-search")
+    assert str(beam.attrs["tilelang.tpu.lmem.statistics.policy"]) == "beam-search"
+    assert str(portfolio.attrs["tilelang.tpu.lmem.statistics.policy"]) == (
+        "portfolio-search-pressure")
+    assert str(agent.attrs["tilelang.tpu.lmem.statistics.policy"]) == (
+        "agent-search-pressure")
+    # ``agent`` remains a compatibility spelling for the auditable portfolio.
+    names = tuple(f"b{index}" for index in range(10))
+    assert [_addr(portfolio.attrs, name) for name in names] == [
+        _addr(agent.attrs, name) for name in names
+    ]
+    assert int(compact.attrs[
+        "tilelang.tpu.lmem.statistics.live_bytes_lower_bound"]) == 208896
+    for result in (compact, beam, portfolio, agent):
+        peak = int(result.attrs["tilelang.tpu.lmem.statistics.peak_bytes"])
+        lower_bound = int(result.attrs[
+            "tilelang.tpu.lmem.statistics.live_bytes_lower_bound"])
+        slack = int(result.attrs[
+            "tilelang.tpu.lmem.statistics.peak_slack_bytes"])
+        assert peak >= lower_bound
+        assert slack == peak - lower_bound
+    assert int(agent.attrs["tilelang.tpu.lmem.statistics.peak_bytes"]) <= 16 * 16 * 1024
+
+
+def test_full_portfolio_verifies_all_branches_for_a_low_pressure_program():
+    module, _ = _pressure_module(
+        {"a": 1024, "b": 1024}, [("a", "b")])
+    greedy = _assign_with_policy(module, "greedy")
+    portfolio = _assign_with_policy(module, "portfolio")
+    agent = _assign_with_policy(module, "agent")
+
+    assert str(portfolio.attrs[
+        "tilelang.tpu.lmem.statistics.policy"]) == "portfolio-incumbent"
+    assert str(agent.attrs[
+        "tilelang.tpu.lmem.statistics.policy"]) == "agent-incumbent"
+    assert _addr(portfolio.attrs, "a") == _addr(greedy.attrs, "a")
+    assert _addr(portfolio.attrs, "b") == _addr(greedy.attrs, "b")
+    assert _addr(agent.attrs, "a") == _addr(greedy.attrs, "a")
+    assert _addr(agent.attrs, "b") == _addr(greedy.attrs, "b")
+    assert int(portfolio.attrs[
+        "tilelang.tpu.lmem.statistics.explored_states"]) > int(greedy.attrs[
+            "tilelang.tpu.lmem.statistics.explored_states"])
+
+
+@pytest.mark.parametrize("repeat", [0, 7])
+def test_static_loop_frequency_weights_bank_conflict_cost(repeat):
+    sizes = {
+        "b0": 10240,
+        "b1": 22528,
+        "b2": 10240,
+        "b3": 34816,
+        "b4": 34816,
+        "b5": 34816,
+        "b6": 30720,
+        "b7": 18432,
+    }
+    accesses = list(itertools.combinations(sizes, 2))
+    module, _ = _pressure_module(
+        sizes, accesses, access_repetitions=[repeat] * len(accesses))
+    greedy = _assign_with_policy(module, "greedy")
+    unweighted = int(greedy.attrs["tilelang.tpu.lmem.statistics.bank_conflicts"])
+    weighted = int(
+        greedy.attrs["tilelang.tpu.lmem.statistics.weighted_bank_conflicts"])
+
+    assert unweighted > 0
+    assert weighted == unweighted * repeat
 
 
 def test_copy_aliases_use_canonical_allocations_and_write_effects():

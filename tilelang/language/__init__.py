@@ -60,6 +60,8 @@ from .customize import (
     view,  # noqa: F401
     ppl_gemm,  # noqa: F401
     ppl_copy,  # noqa: F401
+    tpukernel_parallel_start,  # noqa: F401
+    tpukernel_parallel_end,  # noqa: F401
     ppl_fill,  # noqa: F401
     ppl_add,  # noqa: F401
     ppl_div,  # noqa: F401

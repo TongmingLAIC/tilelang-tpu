@@ -730,7 +730,21 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
       ++tpukernel_extern_count_;
       uses_tpukernel_api_ = true;
     }
-    if (op_name == "tl.tpu.copy") {
+    if (op_name == "tl.tpukernel.parallel_start") {
+      ICHECK_EQ(op->args.size(), 1U)
+          << "TPU-Kernel parallel_start takes no operands";
+      ICHECK_EQ(tpukernel_parallel_depth_, 0)
+          << "nested TPU-Kernel parallel command groups are unsupported";
+      tpukernel_parallel_depth_ = 1;
+      stream << "tpu_parallel_start();\n";
+    } else if (op_name == "tl.tpukernel.parallel_end") {
+      ICHECK_EQ(op->args.size(), 1U)
+          << "TPU-Kernel parallel_end takes no operands";
+      ICHECK_EQ(tpukernel_parallel_depth_, 1)
+          << "TPU-Kernel parallel_end has no matching start";
+      tpukernel_parallel_depth_ = 0;
+      stream << "tpu_parallel_end();\n";
+    } else if (op_name == "tl.tpu.copy") {
       ICHECK_EQ(op->args.size(), 3U)
           << op_name
           << " expects exactly one source and one destination region";
@@ -1585,6 +1599,7 @@ void CodeGenTileLangTPU::AddFunction(const PrimFunc &f) {
   rvt_direct_call_count_ = 0;
   tpukernel_extern_count_ = 0;
   canonical_tpu_op_count_ = 0;
+  tpukernel_parallel_depth_ = 0;
   TPUExternUsageExtractor extern_usage;
   extern_usage(f->body);
   ICHECK(!(extern_usage.has_portable_tpu_op && extern_usage.has_raw_rvt_op))
@@ -1710,6 +1725,8 @@ void CodeGenTileLangTPU::AddFunction(const PrimFunc &f) {
     this->stream << declaration;
   }
   this->PrintStmt(f->body);
+  ICHECK_EQ(tpukernel_parallel_depth_, 0)
+      << "TPU-Kernel parallel_start has no matching end";
   this->EndScope(func_scope);
   this->PrintIndent();
   this->stream << "}\n\n";
