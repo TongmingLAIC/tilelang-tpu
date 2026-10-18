@@ -73,6 +73,7 @@ from .customize import (
     ppl_rsqrt,  # noqa: F401
     ppl_dq2,  # noqa: F401
     ppl_scatter,  # noqa: F401
+    ppl_scatter_add,  # noqa: F401
     ppl_add_C,  # noqa: F401
     ppl_gather,  # noqa: F401
     ppl_embedding,  # noqa: F401
