@@ -625,7 +625,7 @@ def ppl_exp(out, work0, work1, coeff):
     return _exp_impl(out, work0, work1, coeff)
 
 
-def _prepare_row_gather(operation, output, param, index, param_h):
+def _prepare_row_gather(operation, output, param, index, param_h, *, payload_dtypes=None):
     """Validate a global row-gather contract and return semantic operands."""
     for name, buffer in (("output", output), ("param", param), ("index", index)):
         _require_global_buffer(name, buffer)
@@ -636,7 +636,8 @@ def _prepare_row_gather(operation, output, param, index, param_h):
         _require_descriptor_shape(f"{operation} {name}", buffer)
     _require_distinct_storage(operation, output=output, param=param, index=index)
     _require_same_dtype(f"{operation} payload", output, param)
-    _require_dtype("output", output, _TPU_ELEMENTWISE_FLOAT_DTYPES)
+    _require_dtype("output", output,
+                   _TPU_ELEMENTWISE_FLOAT_DTYPES if payload_dtypes is None else payload_dtypes)
     if str(index.dtype) != "uint32":
         raise ValueError(f"{operation} index dtype must be uint32, got {index.dtype}")
     if not isinstance(param_h, int) or param_h <= 0:
@@ -670,33 +671,48 @@ def ppl_gather(output, param, index, param_h):
         index storage must be distinct.
 
     Dtype support:
-        - TPU-Kernel: E4M3, E5M2, FP16, BF16, and FP32 payloads; UINT32 index.
+        - TPU-Kernel: E4M3, E5M2, FP16, BF16, FP32, and UINT32 payloads; UINT32 index.
         - RV Tensor: not exposed by this backend-specific op. Use
           ``ppl_embedding`` for a portable row lookup.
     """
-    outptr, paramptr, indexptr = _prepare_row_gather("ppl_gather", output, param, index, param_h)
+    outptr, paramptr, indexptr = _prepare_row_gather(
+        "ppl_gather", output, param, index, param_h,
+        payload_dtypes=_TPU_ELEMENTWISE_FLOAT_DTYPES | {"uint32"})
     return T.call_extern("handle", "tl.tpukernel.gather", outptr, paramptr, indexptr, param_h)
 
 
 def ppl_topk(dst_data, dst_idx, src, K, descended, length):
     """Select the first ``K`` sorted values and their source indices.
 
-    ``src`` has ``length`` elements.  The TPU HAU primitive writes exactly
-    ``K`` values and ``K`` indices, so both destination buffers must have
-    extent ``K``; no unspecified tail allocation is part of this contract.
+    Global operands use the vector contract ``src=(length,)`` and
+    ``dst_data=dst_idx=(K,)``. Local operands use row-wise rank-2 tiles:
+    ``src=(rows, length)`` and ``dst_data=dst_idx=(rows, K)``. Local outputs
+    may also have width ``length`` for compatibility; only the first ``K``
+    entries in each row are written. The local path stages each row through
+    L2 SRAM and completes its DMA/HAU work before returning.
     This TPU-Kernel-only operation is supported on BM1690 and is rejected for
     SG2260E by target-specific codegen.
 
     Dtype support:
-        - TPU-Kernel on BM1690: FP32, INT32, or UINT32 values; INT32 indices.
+        - Global vectors on BM1690: FP32, INT32, or UINT32 values; INT32 indices.
+        - Local row-wise tiles on BM1690: FP32 values; INT32 or UINT32 indices.
         - TPU-Kernel on SG2260E: unavailable in the current SDK.
         - RV Tensor: unavailable.
     """
-    for name, buffer in (("dst_data", dst_data), ("dst_idx", dst_idx), ("src", src)):
-        _require_global_buffer(name, buffer)
+    operands = (("dst_data", dst_data), ("dst_idx", dst_idx), ("src", src))
+    for name, buffer in operands:
+        _require_buffer(name, buffer)
+    local_rows = all(buffer.scope() in _TPU_LOCAL_SCOPES for _, buffer in operands)
+    for name, buffer in operands:
+        if local_rows:
+            _require_local_buffer(name, buffer)
+        else:
+            _require_global_buffer(name, buffer)
     _require_same_dtype("ppl_topk payload", dst_data, src)
-    _require_dtype("src", src, {"float32", "int32", "uint32"})
-    if str(dst_idx.dtype) != "int32":
+    _require_dtype("src", src, {"float32"} if local_rows else {"float32", "int32", "uint32"})
+    if local_rows:
+        _require_dtype("dst_idx", dst_idx, {"int32", "uint32"})
+    elif str(dst_idx.dtype) != "int32":
         raise ValueError(f"ppl_topk dst_idx dtype must be int32, got {dst_idx.dtype}")
     if not isinstance(K, int) or not isinstance(length, int) or K <= 0 or length <= 0:
         raise ValueError("ppl_topk K and length must be positive Python integers")
@@ -704,17 +720,30 @@ def ppl_topk(dst_data, dst_idx, src, K, descended, length):
         raise ValueError(f"ppl_topk requires K <= length, got K={K}, length={length}")
     if not isinstance(descended, bool):
         raise TypeError("ppl_topk descended must be a Python bool")
-    for name, buffer in (("dst_data", dst_data), ("dst_idx", dst_idx), ("src", src)):
-        _require_rank(name, buffer, 1)
+    for name, buffer in operands:
+        _require_rank(name, buffer, 2 if local_rows else 1)
         _require_descriptor_shape(f"ppl_topk {name}", buffer)
     _require_distinct_storage("ppl_topk", dst_data=dst_data, dst_idx=dst_idx, src=src)
-    try:
-        ir.assert_structural_equal(src.shape[0], length)
-        ir.assert_structural_equal(dst_data.shape[0], K)
-        ir.assert_structural_equal(dst_idx.shape[0], K)
-    except ValueError as error:
-        raise ValueError(
-            "ppl_topk expects src=(length,), dst_data=(K,), and dst_idx=(K,)") from error
+    if local_rows:
+        try:
+            ir.assert_structural_equal(src.shape[1], length)
+            ir.assert_structural_equal(dst_data.shape[0], src.shape[0])
+            ir.assert_structural_equal(dst_idx.shape, dst_data.shape)
+        except ValueError as error:
+            raise ValueError(
+                "ppl_topk local tiles require src=(rows, length) and matching "
+                "dst_data/dst_idx row counts and shapes") from error
+        output_width = _static_positive_dim("ppl_topk output width", dst_data.shape[1])
+        if output_width not in (K, length):
+            raise ValueError("ppl_topk local output width must equal K or length")
+    else:
+        try:
+            ir.assert_structural_equal(src.shape[0], length)
+            ir.assert_structural_equal(dst_data.shape[0], K)
+            ir.assert_structural_equal(dst_idx.shape[0], K)
+        except ValueError as error:
+            raise ValueError(
+                "ppl_topk expects src=(length,), dst_data=(K,), and dst_idx=(K,)") from error
     dst_data_ptr = _tpu_tensor_region(dst_data, "w")
     dst_idx_ptr = _tpu_tensor_region(dst_idx, "w")
     srcptr = _tpu_tensor_region(src, "r")
