@@ -28,6 +28,7 @@ from tilelang.jit.adapter.tpu import (
     reject_unverified_tpu_database_artifact,
 )
 from tilelang.jit.adapter.wrapper import TLTPUSourceWrapper
+from tilelang.temp_storage import user_temp_root
 
 
 class _FakeRun:
@@ -275,6 +276,8 @@ def test_tpu_workspace_is_private_per_generator():
         assert first.tpu_workspace_dir != second.tpu_workspace_dir
         assert Path(first.tpu_workspace_dir).is_dir()
         assert Path(second.tpu_workspace_dir).is_dir()
+        assert Path(first.tpu_workspace_dir).parent == user_temp_root()
+        assert Path(second.tpu_workspace_dir).parent == user_temp_root()
     finally:
         first.remove_lib()
         second.remove_lib()

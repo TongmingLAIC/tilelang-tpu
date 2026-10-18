@@ -15,6 +15,7 @@ import logging
 import re
 import weakref
 from tilelang.env import TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
+from tilelang.temp_storage import tilelang_temp_dir
 from tilelang.jit.adapter.ppl_layout import PPLLayout, resolve_ppl_layout
 from tilelang.engine.tpu_config import (
     TPURuntimeConfig,
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 def _new_temporary_source(suffix: str) -> str:
     """Create a named source file without leaving an open file descriptor."""
 
-    descriptor, path = tempfile.mkstemp(suffix=suffix, text=True)
+    descriptor, path = tempfile.mkstemp(suffix=suffix, text=True, dir=tilelang_temp_dir())
     os.close(descriptor)
     return path
 
@@ -103,7 +104,8 @@ class LibraryGenerator(object):
 
     def _ensure_tpu_workspace(self) -> str:
         if self.tpu_workspace_dir is None:
-            self.tpu_workspace_dir = tempfile.mkdtemp(prefix="tilelang-tpu-")
+            self.tpu_workspace_dir = tempfile.mkdtemp(prefix="tilelang-tpu-",
+                                                     dir=tilelang_temp_dir())
             # Do not rely on every adapter/user remembering remove_lib().
             # ``weakref.finalize`` also runs for live objects at normal Python
             # shutdown, unlike ``__del__``-only cleanup.  The callback retains

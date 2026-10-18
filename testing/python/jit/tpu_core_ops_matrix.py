@@ -24,6 +24,7 @@ import tempfile
 from typing import Any, Mapping, Optional
 
 from tilelang.jit import TPUInstructionProfiler, TPUProfilingConfig
+from tilelang.temp_storage import tilelang_temp_dir
 
 if __package__:
     from .tpu_matrix_common import (
@@ -617,7 +618,7 @@ def main() -> int:
     except FileExistsError as error:
         raise RuntimeError(
             f"refusing to reuse an existing matrix output directory {output_dir}") from error
-    scratch_dir = Path(tempfile.mkdtemp(prefix=".scratch-", dir=output_dir))
+    scratch_dir = Path(tempfile.mkdtemp(prefix=".scratch-", dir=tilelang_temp_dir()))
     try:
         environment = _worker_environment(repo_root, args.runtime_mode, args.device_id)
         environment = pin_worker_cache_environment(environment, scratch_dir)

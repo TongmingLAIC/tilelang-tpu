@@ -703,6 +703,13 @@ def test_tpukernel_matrix_parent_death_guard_prevents_orphans(tmp_path):
 def test_tpukernel_matrix_timeout_has_bounded_pipe_drain(tmp_path, monkeypatch):
     """An escaped pipe holder cannot turn a numerical timeout into a hang."""
 
+    # Exercise the outer process-group supervisor without a PID namespace:
+    # the namespace would itself reap the escaped child, masking this case.
+    from tilelang.jit import tpu_cmodel
+    monkeypatch.setattr(tpu_cmodel, "prepare_cmodel_command",
+                        lambda command, *, cwd, environment, private_tmp_dir: (
+                            list(command), dict(environment)))
+
     matrix_dir = Path(__file__).resolve().parent
     monkeypatch.syspath_prepend(str(matrix_dir))
     matrix_module = importlib.import_module("tpukernel_ops_matrix")
@@ -776,6 +783,13 @@ def test_tpukernel_matrix_timeout_has_bounded_pipe_drain(tmp_path, monkeypatch):
 )
 def test_tpukernel_matrix_rejects_success_with_lingering_descendant(tmp_path, monkeypatch):
     """A nominally successful worker may not background an in-group child."""
+
+    # Keep host PIDs visible to this process-supervisor unit test. Actual IPC
+    # namespace cleanup is tested separately in test_tpu_cmodel.py.
+    from tilelang.jit import tpu_cmodel
+    monkeypatch.setattr(tpu_cmodel, "prepare_cmodel_command",
+                        lambda command, *, cwd, environment, private_tmp_dir: (
+                            list(command), dict(environment)))
 
     matrix_dir = Path(__file__).resolve().parent
     monkeypatch.syspath_prepend(str(matrix_dir))
@@ -1460,6 +1474,19 @@ def _run_opt_in_pcie_profile_or_abort(config: TPUProfilingConfig, case: str):
         )
 
 
+def _assert_profile_worker_result(report, *, case: str, runtime_mode: str):
+    prefix = "TPU_CORE_NUMERIC_RESULT="
+    payloads = [json.loads(line[len(prefix):])
+                for line in report.stdout_path.read_text(encoding="utf-8").splitlines()
+                if line.startswith(prefix)]
+    assert len(payloads) == 1
+    assert payloads[0]["schema_version"] == 1
+    assert payloads[0]["case"] == case
+    assert payloads[0]["runtime_mode"] == runtime_mode
+    assert payloads[0]["status"] == "passed"
+    assert payloads[0]["metrics"]["passed"] is True
+
+
 @pytest.mark.skipif(
     os.environ.get("TILELANG_TPU_RUN_CMODEL_PROFILE") != "1",
     reason="set TILELANG_TPU_RUN_CMODEL_PROFILE=1 for the isolated CModel profile worker",
@@ -1479,8 +1506,7 @@ def test_sg2260e_tpukernel_cmodel_profile_worker_collects_real_raw_trace(tmp_pat
 
     report = _run_opt_in_cmodel_profile_or_abort(config, "tpukernel-matmul")
 
-    assert "TPU_PROFILE_WORKER_OK case=tpukernel-matmul" in report.stdout_path.read_text(
-        encoding="utf-8")
+    _assert_profile_worker_result(report, case="tpukernel-matmul", runtime_mode="cmodel")
     assert report.has_raw_trace
     assert report.raw_instructions
     # The local SDK may not bundle PerfAI; raw-only is an intentional result.
@@ -1507,7 +1533,7 @@ def test_sg2260e_rv_cmodel_profile_worker_runs_control_path(tmp_path):
 
     report = _run_opt_in_cmodel_profile_or_abort(config, "rv-control")
 
-    assert "TPU_PROFILE_WORKER_OK case=rv-control" in report.stdout_path.read_text(encoding="utf-8")
+    _assert_profile_worker_result(report, case="rv-control", runtime_mode="cmodel")
     assert report.has_raw_trace
     assert report.raw_instructions
 
@@ -1532,8 +1558,7 @@ def test_sg2260e_tpukernel_pcie_profile_worker_collects_real_raw_trace(tmp_path)
 
     report = _run_opt_in_pcie_profile_or_abort(config, "tpukernel-matmul")
 
-    assert "TPU_PROFILE_WORKER_OK case=tpukernel-matmul" in (report.stdout_path.read_text(
-        encoding="utf-8"))
+    _assert_profile_worker_result(report, case="tpukernel-matmul", runtime_mode="pcie")
     assert report.has_raw_trace
     assert report.parser_status in ("unavailable", "ready", "no-device-command-events")
     if report.parser_status == "ready":
@@ -1562,6 +1587,5 @@ def test_sg2260e_rv_pcie_profile_worker_runs_control_path(tmp_path):
 
     report = _run_opt_in_pcie_profile_or_abort(config, "rv-control")
 
-    assert "TPU_PROFILE_WORKER_OK case=rv-control" in (report.stdout_path.read_text(
-        encoding="utf-8"))
+    _assert_profile_worker_result(report, case="rv-control", runtime_mode="pcie")
     assert report.has_raw_trace

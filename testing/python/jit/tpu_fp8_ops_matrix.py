@@ -20,6 +20,7 @@ import tempfile
 from typing import Any, Mapping, Optional
 
 from tilelang.jit import TPUInstructionProfiler, TPUProfilingConfig
+from tilelang.temp_storage import tilelang_temp_dir
 
 if __package__:
     from .tpu_matrix_common import (
@@ -626,7 +627,7 @@ def main() -> int:
         raise RuntimeError(
             f"refusing to reuse an existing matrix output directory {output_dir}") from exc
 
-    scratch = Path(tempfile.mkdtemp(prefix=".scratch-", dir=output_dir))
+    scratch = Path(tempfile.mkdtemp(prefix=".scratch-", dir=tilelang_temp_dir()))
     try:
         environment = _worker_environment(repo_root, scratch, args.runtime_mode, args.device_id)
         if args.runtime_mode == "pcie":

@@ -313,28 +313,40 @@ extern "C" int tilelang_tpu_run(void** args) {{
       double total_time_us = 0.0;
       double min_time_us = std::numeric_limits<double>::max();
       double max_time_us = 0.0;
+      std::vector<double> run_times_us;
+      run_times_us.reserve(measure_runs);
       for (int i = 0; i < measure_runs; ++i) {{
-        const auto run_start = std::chrono::high_resolution_clock::now();
+        const auto run_start = std::chrono::steady_clock::now();
 {pure_kernel_call}
-        const auto run_end = std::chrono::high_resolution_clock::now();
+        const auto run_end = std::chrono::steady_clock::now();
         if (rst != 0) {{
           status = rst;
           break;
         }}
         const double run_time_us =
-            std::chrono::duration_cast<std::chrono::microseconds>(run_end - run_start)
-                .count();
+            std::chrono::duration<double, std::micro>(run_end - run_start).count();
         total_time_us += run_time_us;
         min_time_us = std::min(min_time_us, run_time_us);
         max_time_us = std::max(max_time_us, run_time_us);
+        run_times_us.push_back(run_time_us);
       }}
       if (status != 0) {{
         break;
       }}
+      std::sort(run_times_us.begin(), run_times_us.end());
+      const double median_time_us =
+          (run_times_us[(measure_runs - 1) / 2] + run_times_us[measure_runs / 2]) / 2.0;
+      const double p10_time_us = run_times_us[(measure_runs - 1) / 10];
+      const double p90_time_us = run_times_us[9 * (measure_runs - 1) / 10];
+      const auto previous_precision = std::cout.precision(12);
       std::cout << "Runs: " << measure_runs << ", average: "
                 << total_time_us / measure_runs / 1000.0 << " ms, min: "
                 << min_time_us / 1000.0 << " ms, max: "
-                << max_time_us / 1000.0 << " ms\n";
+                << max_time_us / 1000.0 << " ms, median: "
+                << median_time_us / 1000.0 << " ms, p10: "
+                << p10_time_us / 1000.0 << " ms, p90: "
+                << p90_time_us / 1000.0 << " ms\n";
+      std::cout.precision(previous_precision);
     }}
 
     if (tpuRtStreamSynchronize(stream) != tpuRtSuccess) {{

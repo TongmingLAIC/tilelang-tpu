@@ -2,10 +2,11 @@
 # Licensed under the MIT License.
 
 import tilelang.language as T
+from tilelang.temp_storage import tilelang_temp_dir
 
 
 def plot_layout(layout: T.Layout,
-                save_directory="./tmp",
+                save_directory=None,
                 name: str = "layout",
                 colormap: str = "RdPu",
                 verbose: bool = False) -> None:
@@ -17,7 +18,8 @@ def plot_layout(layout: T.Layout,
     layout : T.Layout
         The layout object that describes how indices are mapped.
     save_directory : str, optional
-        The directory where the output images will be saved (default is "./tmp").
+        The directory where the output images will be saved (default is
+        ``~/tmp/tilelang/plots``).
     name : str, optional
         The base name of the output files (default is "layout").
     colormap : str, optional
@@ -187,7 +189,8 @@ def plot_layout(layout: T.Layout,
         ncols=2)
 
     # Create the output directory if it does not exist
-    tmp_directory = pathlib.Path(save_directory)
+    tmp_directory = (tilelang_temp_dir() / "plots" if save_directory is None else
+                     pathlib.Path(save_directory))
     if not os.path.exists(tmp_directory):
         os.makedirs(tmp_directory)
 

@@ -8,6 +8,11 @@ import ctypes
 import logging
 from tqdm import tqdm
 
+from .temp_storage import configure_process_temp
+
+
+configure_process_temp()
+
 
 class TqdmLoggingHandler(logging.Handler):
     """Custom logging handler that directs log output to tqdm progress bar to avoid interference."""

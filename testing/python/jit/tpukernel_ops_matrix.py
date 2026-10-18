@@ -45,6 +45,8 @@ import tempfile
 import time
 from typing import Any, Mapping, Optional, Sequence
 
+from tilelang.temp_storage import tilelang_temp_dir
+
 from tpukernel_ops_worker import (
     CaseSpec,
     _CHIPS,
@@ -573,7 +575,7 @@ def _run_one(args: argparse.Namespace, base_environment: Mapping[str, str], outp
              worker: Path, chip: str, case: CaseSpec) -> dict[str, Any]:
     case_dir = _case_directory(output_dir, chip, args.runtime_mode, case)
     case_dir.mkdir(parents=True, exist_ok=True)
-    scratch_dir = Path(tempfile.mkdtemp(prefix=".scratch-", dir=case_dir))
+    scratch_dir = Path(tempfile.mkdtemp(prefix=".scratch-", dir=tilelang_temp_dir()))
     command = [
         sys.executable,
         "-u",
@@ -640,8 +642,14 @@ def _run_one(args: argparse.Namespace, base_environment: Mapping[str, str], outp
                     "cleanup_complete": supervised.cleanup_complete,
                 }
         else:
+            from tilelang.jit.tpu_cmodel import prepare_cmodel_command
+
+            launched_command, environment = prepare_cmodel_command(
+                command, cwd=scratch_dir, environment=environment,
+                private_tmp_dir=scratch_dir)
             launch_attempted = True
-            process = _spawn_guarded_worker(command, cwd=scratch_dir, environment=environment)
+            process = _spawn_guarded_worker(
+                launched_command, cwd=scratch_dir, environment=environment)
             try:
                 stdout, stderr = process.communicate(timeout=args.timeout)
             except subprocess.TimeoutExpired:
@@ -1041,7 +1049,7 @@ def main() -> int:
         raise RuntimeError(
             f"refusing to reuse an existing matrix output directory {output_dir}") from error
 
-    scratch_dir = Path(tempfile.mkdtemp(prefix=".scratch-", dir=output_dir))
+    scratch_dir = Path(tempfile.mkdtemp(prefix=".scratch-", dir=tilelang_temp_dir()))
     try:
         environment = _base_worker_environment(repo_root, args.runtime_mode, args.device_id)
         environment["TMPDIR"] = str(scratch_dir)

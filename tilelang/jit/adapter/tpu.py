@@ -231,6 +231,10 @@ def make_tpu_forward(lib: ctypes.CDLL, params: Sequence, result_idx: List[int],
         # main.so owns process-global TPU runtime objects. ctypes may release
         # the GIL during this call, so serialize all adapters in this process.
         with _TPU_EXECUTION_LOCK:
+            owner = getattr(lib, "_tilelang_tpu_workspace_owner", None)
+            if owner is not None and owner.tpu_runtime.runtime_mode == "cmodel":
+                from tilelang.jit.tpu_cmodel import require_private_cmodel
+                require_private_cmodel()
             status = run(argv)
         if status != 0:
             raise RuntimeError(f"TileLang TPU execution failed with status {status}.")

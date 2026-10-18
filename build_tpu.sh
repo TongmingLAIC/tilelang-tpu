@@ -6,6 +6,18 @@ repo_root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 build_dir="$repo_root/build-tpu"
 tvm_config="$repo_root/3rdparty/tvm/cmake/config.cmake"
 build_config="$build_dir/config.cmake"
+tilelang_tmp_root="${HOME:?HOME must be set}/tmp/tilelang"
+
+if [[ -L "$HOME/tmp" || -L "$tilelang_tmp_root" ]]; then
+  echo "TileLang temporary directories must not be symlinks" >&2
+  exit 1
+fi
+install -d -m 700 "$HOME/tmp" "$tilelang_tmp_root"
+if [[ ! -O "$HOME/tmp" || ! -O "$tilelang_tmp_root" ]]; then
+  echo "TileLang temporary directories must be owned by the current user" >&2
+  exit 1
+fi
+export TMPDIR="$tilelang_tmp_root" TMP="$tilelang_tmp_root" TEMP="$tilelang_tmp_root"
 
 if [[ ! -f "$tvm_config" ]]; then
   echo "The TVM submodule is not ready: $tvm_config" >&2

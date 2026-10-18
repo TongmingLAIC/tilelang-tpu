@@ -32,6 +32,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from tilelang.temp_storage import tilelang_temp_dir
 from tpu_demo.cases import (DTYPES, OPERATIONS, TARGET_CONFIGS, DemoCase, build_cases,
                             kernel_variant)
 
@@ -1448,7 +1449,7 @@ def main() -> int:
     configurations = selected_configurations(args)
     scheduled = scheduled_cases(configurations, cases)
     environment = worker_environment(repo_root, args.runtime_mode, args.device_id)
-    scratch_dir = Path(tempfile.mkdtemp(prefix=".scratch-", dir=output_dir))
+    scratch_dir = Path(tempfile.mkdtemp(prefix=".scratch-", dir=tilelang_temp_dir()))
     environment = pin_worker_cache_environment(environment, scratch_dir)
     try:
         if args.runtime_mode == "pcie":
