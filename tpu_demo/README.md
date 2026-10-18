@@ -1,10 +1,12 @@
 # TPU Operator Examples
 
-This directory contains user-facing TileLang examples for SOPHGO TPUs. Every
-operator package exports a `build_*` function for constructing a TileLang
+This directory contains user-facing TileLang examples for SOPHGO TPUs. The
+operator packages export a `build_*` function for constructing a TileLang
 program and a `run` function that executes one numerical comparison against a
-PyTorch reference. Low-level instruction tests live under
-`testing/python/jit/`.
+PyTorch reference. The `pipeline_add` and `pipeline_matmul` packages instead
+provide serial and manually double-buffered TPU-Kernel builders for compiler
+experiments; their guarded numerical and device runners live under
+`testing/python/jit/`. They do not implement automatic software pipelining.
 
 See [OP_MAPPING.md](./OP_MAPPING.md) for the complete public-op mapping,
 instruction selection, dtype matrix, and backend-specific restrictions.
@@ -73,6 +75,14 @@ The operator packages export:
 - `tpu_demo.swiglu.build_swiglu`
 - `tpu_demo.flashattn.build_flashattn`
 
+The manual command-group experiments provide
+`tpu_demo.pipeline_add.pipeline_add.build_pipeline_add` and
+`tpu_demo.pipeline_matmul.pipeline_matmul.build_pipelined_matmul`. They use
+`T.tpukernel_parallel_start()` / `T.tpukernel_parallel_end()` to mark a
+non-nested TPU-Kernel command group. Each group must open and close inside the
+same loop iteration, and the compiler conservatively keeps participating local
+buffers live for the whole group.
+
 For example:
 
 ```python
@@ -117,15 +127,20 @@ python testing/python/jit/tpu_demo_ops_matrix.py \
 Run one SG2260E RV CModel case:
 
 ```bash
-python -m tpu_demo.run \
+python -m tilelang.jit.tpu_cmodel \
+  --output-dir "$HOME/tmp/tilelang/demo-rv-$(date +%s%N)" -- \
+  python -m tpu_demo.run \
   --case matmul.float16 \
   --chip sg2260e \
   --programming-model rv \
   --runtime-mode cmodel
 ```
 
-`python -m tpu_demo.run` is intentionally CModel-only. Use the supervised
-matrix runner for PCIe so board access remains serialized and health-checked.
+`python -m tpu_demo.run` is intentionally CModel-only and must run inside the
+private CModel launcher. The launcher creates its temporary storage under
+`~/tmp/tilelang`; its result directory must not already exist. Use the
+supervised matrix runner for PCIe so board access remains serialized and
+health-checked.
 
 ## Numerical contract
 

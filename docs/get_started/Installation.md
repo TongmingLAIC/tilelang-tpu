@@ -166,13 +166,17 @@ sg2260e: tpub_7_1_e, 4 cores
 Run one TPU-Kernel example and one RV Tensor example with CModel:
 
 ```bash
-python -m tpu_demo.run \
+python -m tilelang.jit.tpu_cmodel \
+  --output-dir "$HOME/tmp/tilelang/install-tpukernel-$(date +%s%N)" -- \
+  python -m tpu_demo.run \
   --case elementwise-add.float16 \
   --chip sg2260e \
   --programming-model tpukernel \
   --runtime-mode cmodel
 
-python -m tpu_demo.run \
+python -m tilelang.jit.tpu_cmodel \
+  --output-dir "$HOME/tmp/tilelang/install-rv-$(date +%s%N)" -- \
+  python -m tpu_demo.run \
   --case matmul.float16 \
   --chip sg2260e \
   --programming-model rv \
@@ -181,7 +185,12 @@ python -m tpu_demo.run \
 
 Each command returns a JSON result with `"status": "passed"` when the Python
 environment, native libraries, PPL SDK, and CModel runtime are configured
-correctly.
+correctly. Importing TileLang automatically creates and uses the private
+`~/tmp/tilelang` scratch directory. CModel must run through the launcher:
+the vendor's fixed `/tmp` communication path is remapped to a fresh directory
+under `~/tmp/tilelang` for each invocation. The result directory must not
+exist beforehand. This isolation requires Linux user namespaces and
+`bubblewrap`.
 
 ## 7. Configure SG2260E PCIe execution
 

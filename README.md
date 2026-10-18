@@ -77,12 +77,23 @@ export PYTHONPATH="${TILELANG_TPU_SOURCE}${PYTHONPATH:+:${PYTHONPATH}}"
 Run an SG2260E RV Tensor kernel with CModel:
 
 ```bash
-python -m tpu_demo.run \
+python -m tilelang.jit.tpu_cmodel \
+  --output-dir "$HOME/tmp/tilelang/quickstart-rv-$(date +%s%N)" -- \
+  python -m tpu_demo.run \
   --case matmul.float16 \
   --chip sg2260e \
   --programming-model rv \
   --runtime-mode cmodel
 ```
+
+The native build script and TileLang's Python import create a private
+`~/tmp/tilelang` directory and use it for ordinary build, compiler, and
+Python scratch files. The CModel launcher stores its private communication
+files there too. The vendor simulator still
+refers to `/tmp` internally, but its isolated `/tmp` is backed by a fresh
+subdirectory of `~/tmp/tilelang`, not the host's shared `/tmp`. The launcher
+requires Linux user namespaces and `bubblewrap`; it will not fall back to a
+shared communication path. The chosen result directory must not exist yet.
 
 See the [installation guide](./docs/get_started/Installation.md) for system
 packages, PPL SDK checks, non-standard build directories, and PCIe setup.
@@ -177,12 +188,20 @@ a common command-line runner. They cover:
 | RoPE | Rotary positional embedding | TPU-Kernel |
 | SwiGLU | Gated activation | TPU-Kernel |
 | FlashAttention | Tiled attention with online softmax | TPU-Kernel |
+| Manual pipeline add and matmul | Serial and double-buffered command groups for compiler experiments | TPU-Kernel |
 
-The examples accept `float16`, `bfloat16`, and `float32`. The TPU DSL and
+The core operator examples accept `float16`, `bfloat16`, and `float32`; the
+manual pipeline matmul experiment currently uses `float16`. The TPU DSL and
 TPU-Kernel instruction selector also provide operation-specific FP8 paths, with
 their data-type constraints enforced during lowering. See the
 [demo guide](./tpu_demo/README.md) for builder APIs, case selection, numerical
 comparison rules, and the serial PCIe runner.
+
+The manual pipeline examples use `T.tpukernel_parallel_start()` and
+`T.tpukernel_parallel_end()`. These mark low-level, non-nested TPU-Kernel
+command groups; they are not an automatic software-pipeline pass. The compiler
+checks marker structure and extends participating buffers' lifetimes before
+address assignment.
 
 ## Profiling
 
