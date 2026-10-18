@@ -641,7 +641,7 @@ def ppl_exp(out, work0, work1, coeff):
     return _exp_impl(out, work0, work1, coeff)
 
 
-def _prepare_row_gather(operation, output, param, index, param_h):
+def _prepare_row_gather(operation, output, param, index, param_h, *, payload_dtypes=None):
     """Validate a global row-gather contract and return semantic operands."""
     for name, buffer in (("output", output), ("param", param), ("index", index)):
         _require_global_buffer(name, buffer)
@@ -652,7 +652,8 @@ def _prepare_row_gather(operation, output, param, index, param_h):
         _require_descriptor_shape(f"{operation} {name}", buffer)
     _require_distinct_storage(operation, output=output, param=param, index=index)
     _require_same_dtype(f"{operation} payload", output, param)
-    _require_dtype("output", output, _TPU_ELEMENTWISE_FLOAT_DTYPES)
+    _require_dtype("output", output,
+                   _TPU_ELEMENTWISE_FLOAT_DTYPES if payload_dtypes is None else payload_dtypes)
     if str(index.dtype) != "uint32":
         raise ValueError(f"{operation} index dtype must be uint32, got {index.dtype}")
     if not isinstance(param_h, int) or param_h <= 0:
@@ -686,33 +687,48 @@ def ppl_gather(output, param, index, param_h):
         index storage must be distinct.
 
     Dtype support:
-        - TPU-Kernel: E4M3, E5M2, FP16, BF16, and FP32 payloads; UINT32 index.
+        - TPU-Kernel: E4M3, E5M2, FP16, BF16, FP32, and UINT32 payloads; UINT32 index.
         - RV Tensor: not exposed by this backend-specific op. Use
           ``ppl_embedding`` for a portable row lookup.
     """
-    outptr, paramptr, indexptr = _prepare_row_gather("ppl_gather", output, param, index, param_h)
+    outptr, paramptr, indexptr = _prepare_row_gather(
+        "ppl_gather", output, param, index, param_h,
+        payload_dtypes=_TPU_ELEMENTWISE_FLOAT_DTYPES | {"uint32"})
     return T.call_extern("handle", "tl.tpukernel.gather", outptr, paramptr, indexptr, param_h)
 
 
 def ppl_topk(dst_data, dst_idx, src, K, descended, length):
     """Select the first ``K`` sorted values and their source indices.
 
-    ``src`` has ``length`` elements.  The TPU HAU primitive writes exactly
-    ``K`` values and ``K`` indices, so both destination buffers must have
-    extent ``K``; no unspecified tail allocation is part of this contract.
+    Global operands use the vector contract ``src=(length,)`` and
+    ``dst_data=dst_idx=(K,)``. Local operands use row-wise rank-2 tiles:
+    ``src=(rows, length)`` and ``dst_data=dst_idx=(rows, K)``. Local outputs
+    may also have width ``length`` for compatibility; only the first ``K``
+    entries in each row are written. The local path stages each row through
+    L2 SRAM and completes its DMA/HAU work before returning.
     This TPU-Kernel-only operation is supported on BM1690 and is rejected for
     SG2260E by target-specific codegen.
 
     Dtype support:
-        - TPU-Kernel on BM1690: FP32, INT32, or UINT32 values; INT32 indices.
+        - Global vectors on BM1690: FP32, INT32, or UINT32 values; INT32 indices.
+        - Local row-wise tiles on BM1690: FP32 values; INT32 or UINT32 indices.
         - TPU-Kernel on SG2260E: unavailable in the current SDK.
         - RV Tensor: unavailable.
     """
-    for name, buffer in (("dst_data", dst_data), ("dst_idx", dst_idx), ("src", src)):
-        _require_global_buffer(name, buffer)
+    operands = (("dst_data", dst_data), ("dst_idx", dst_idx), ("src", src))
+    for name, buffer in operands:
+        _require_buffer(name, buffer)
+    local_rows = all(buffer.scope() in _TPU_LOCAL_SCOPES for _, buffer in operands)
+    for name, buffer in operands:
+        if local_rows:
+            _require_local_buffer(name, buffer)
+        else:
+            _require_global_buffer(name, buffer)
     _require_same_dtype("ppl_topk payload", dst_data, src)
-    _require_dtype("src", src, {"float32", "int32", "uint32"})
-    if str(dst_idx.dtype) != "int32":
+    _require_dtype("src", src, {"float32"} if local_rows else {"float32", "int32", "uint32"})
+    if local_rows:
+        _require_dtype("dst_idx", dst_idx, {"int32", "uint32"})
+    elif str(dst_idx.dtype) != "int32":
         raise ValueError(f"ppl_topk dst_idx dtype must be int32, got {dst_idx.dtype}")
     if not isinstance(K, int) or not isinstance(length, int) or K <= 0 or length <= 0:
         raise ValueError("ppl_topk K and length must be positive Python integers")
@@ -720,17 +736,30 @@ def ppl_topk(dst_data, dst_idx, src, K, descended, length):
         raise ValueError(f"ppl_topk requires K <= length, got K={K}, length={length}")
     if not isinstance(descended, bool):
         raise TypeError("ppl_topk descended must be a Python bool")
-    for name, buffer in (("dst_data", dst_data), ("dst_idx", dst_idx), ("src", src)):
-        _require_rank(name, buffer, 1)
+    for name, buffer in operands:
+        _require_rank(name, buffer, 2 if local_rows else 1)
         _require_descriptor_shape(f"ppl_topk {name}", buffer)
     _require_distinct_storage("ppl_topk", dst_data=dst_data, dst_idx=dst_idx, src=src)
-    try:
-        ir.assert_structural_equal(src.shape[0], length)
-        ir.assert_structural_equal(dst_data.shape[0], K)
-        ir.assert_structural_equal(dst_idx.shape[0], K)
-    except ValueError as error:
-        raise ValueError(
-            "ppl_topk expects src=(length,), dst_data=(K,), and dst_idx=(K,)") from error
+    if local_rows:
+        try:
+            ir.assert_structural_equal(src.shape[1], length)
+            ir.assert_structural_equal(dst_data.shape[0], src.shape[0])
+            ir.assert_structural_equal(dst_idx.shape, dst_data.shape)
+        except ValueError as error:
+            raise ValueError(
+                "ppl_topk local tiles require src=(rows, length) and matching "
+                "dst_data/dst_idx row counts and shapes") from error
+        output_width = _static_positive_dim("ppl_topk output width", dst_data.shape[1])
+        if output_width not in (K, length):
+            raise ValueError("ppl_topk local output width must equal K or length")
+    else:
+        try:
+            ir.assert_structural_equal(src.shape[0], length)
+            ir.assert_structural_equal(dst_data.shape[0], K)
+            ir.assert_structural_equal(dst_idx.shape[0], K)
+        except ValueError as error:
+            raise ValueError(
+                "ppl_topk expects src=(length,), dst_data=(K,), and dst_idx=(K,)") from error
     dst_data_ptr = _tpu_tensor_region(dst_data, "w")
     dst_idx_ptr = _tpu_tensor_region(dst_idx, "w")
     srcptr = _tpu_tensor_region(src, "r")
@@ -767,6 +796,175 @@ def ppl_rsqrt(out, inp):
     inpptr = _tpu_tensor_region(inp, "r")
     outptr = _tpu_tensor_region(out, "w")
     return T.call_extern("handle", "tl.tpu.rsqrt", outptr, inpptr)
+
+
+def ppl_dq2(out, src_packed, offset_scale, gsize):
+    """Dequantize 4-bit packed weights: `out = (src - offset) * scale`, per group.
+
+    This is the W4A16 / GPTQ weight path -- the dequantize step that
+    `matmul_gptq_forward` and `llama_mlp_gptq_forward` perform in torch-tpu.
+
+    Args:
+        out: FP16 or BF16 destination tile, shape `(N, K)`.
+        src_packed: UINT8 tile of shape `(N, K // 2)`.  Each byte carries two
+            4-bit weights with the **low nibble first**, matching `input_reorder`
+            in the PPL reference `examples/cxx/matmul/w4a16_matmul_dq2.py`.  The
+            instruction consumes it as `DT_UINT4` over `K` elements, so the
+            descriptor is emitted with twice this tile's W extent.
+        offset_scale: UINT32 tile of shape `(N, K // gsize)`.  Each 32-bit word
+            packs two FP16 halves: **low 16 bits are the offset (zero-point),
+            high 16 bits are the scale**.  This is what the PPL manual specifies
+            for `dq2`, and it matches `scale_zp_reorder` in the reference above.
+        gsize: group size in elements.  `K % gsize` must be zero.
+
+    Semantics source:
+        `PPL 开发参考手册` section 4.6 (`ppl::tiu::dq2`) plus the RV signature
+        `rvt_dq2(uint64_t out, uint64_t a, uint64_t scale, uint64_t _gsize)`.
+
+    Dtype support:
+        - dst (`out`): FP16, BF16.
+        - src (`src_packed`): 4-bit packed, stored as UINT8.
+
+    Backend support:
+        - RV Tensor: `rvt_dq2(out, a, scale, gsize)`.
+        - TPU-Kernel: **not available**.  That layer exposes only the fused
+          `tpu_bdc_fp_dq2_mm2_nt/tt` forms -- there is no standalone dequantize
+          instruction to lower to.  This is also why `ppl-compile` rejects the
+          PPL-level `tiu::dq2` on this chip: the unfused form has no lowering.
+    """
+    for name, buffer in (("out", out), ("src", src_packed),
+                         ("offset_scale", offset_scale)):
+        _require_local_buffer(name, buffer)
+    _require_dtype("out", out, {"float16", "bfloat16"})
+    _require_dtype("src", src_packed, {"uint8"})
+    _require_dtype("offset_scale", offset_scale, {"uint32"})
+    _require_rank("out", out, 2)
+    _require_rank("src", src_packed, 2)
+    _require_rank("offset_scale", offset_scale, 2)
+    _require_distinct_storage("ppl_dq2", out=out, src=src_packed,
+                              offset_scale=offset_scale)
+    _require_descriptor_shape("ppl_dq2 out", out)
+    _require_descriptor_shape("ppl_dq2 src", src_packed)
+    _require_descriptor_shape("ppl_dq2 offset_scale", offset_scale)
+    group_size = _static_positive_dim("ppl_dq2 gsize", gsize)
+
+    out_n = _static_positive_dim("ppl_dq2 out N", out.shape[0])
+    out_k = _static_positive_dim("ppl_dq2 out K", out.shape[1])
+    src_n = _static_positive_dim("ppl_dq2 src N", src_packed.shape[0])
+    src_w = _static_positive_dim("ppl_dq2 src W", src_packed.shape[1])
+    scale_n = _static_positive_dim("ppl_dq2 offset_scale N", offset_scale.shape[0])
+    scale_w = _static_positive_dim("ppl_dq2 offset_scale W", offset_scale.shape[1])
+
+    if src_w * 2 != out_k:
+        raise ValueError("ppl_dq2 src holds two 4-bit weights per byte, so its W "
+                         f"extent must be half of out's: got src W={src_w}, "
+                         f"out W={out_k}")
+    if out_k % group_size != 0:
+        raise ValueError("ppl_dq2 requires gsize to divide K, got "
+                         f"gsize={group_size}, K={out_k}")
+    if scale_w != out_k // group_size:
+        raise ValueError("ppl_dq2 offset_scale must carry one packed word per "
+                         f"group: expected W={out_k // group_size}, got "
+                         f"{scale_w}")
+    if src_n != out_n or scale_n != out_n:
+        raise ValueError("ppl_dq2 requires out, src, and offset_scale to share "
+                         "the same N extent")
+
+    outptr = _tpu_tensor_region(out, "w")
+    srcptr = _tpu_tensor_region(src_packed, "r")
+    scaleptr = _tpu_tensor_region(offset_scale, "r")
+    return T.call_extern("handle", "tl.tpu.dq2", outptr, srcptr, scaleptr,
+                         group_size)
+
+
+def ppl_scatter(dst, src, index):
+    """Scatter rows into a global tensor using an index table.
+
+    This is the KV-cache write in paged attention: a local tile of freshly
+    computed K (or V) rows is written into the paged cache at the slots named by
+    the index table.
+
+    Reference: `examples/cxx/llm/paged_attention_multicore.pl` and its RV
+    lowering, which emits
+
+        rvt_gr(34, .., in_kcache_save.addr, CONTINUOUS_LAYOUT, .., (int *)NULL);
+        rvt_tr(9,  .., k_tensor.addr,       FREE_LAYOUT, .., &k_tensor.stride);
+        rvt_tr(8,  .., save_tbl.addr,       FREE_LAYOUT, .., &save_tbl.stride);
+        { uint64_t zero = 0; rvt_cfg_dmaidx(0, &zero); }
+        rvt_dma_fhscatter(34, 9, 8, 0, 0);
+
+    Note the three different descriptor shapes: the destination is a *global*
+    tensor under CONTINUOUS_LAYOUT with computed strides, while source and index
+    table are local tiles under FREE_LAYOUT with explicit strides.
+
+    Args:
+        dst: FP16 global tensor -- the paged K or V cache.
+        src: FP16 local tile holding the rows to write.
+        index: UINT32 local tile naming the destination slot of each row.
+
+    Backend support:
+        - RV Tensor: `rvt_dma_fhscatter` + `rvt_cfg_dmaidx`.
+        - TPU-Kernel: not implemented.
+    """
+    _require_global_buffer("dst", dst)
+    _require_local_buffer("src", src)
+    _require_local_buffer("index", index)
+    _require_dtype("dst", dst, {"float16", "bfloat16"})
+    _require_dtype("src", src, {"float16", "bfloat16"})
+    _require_dtype("index", index, {"uint32"})
+    _require_same_dtype("ppl_scatter", dst, src)
+    _require_distinct_storage("ppl_scatter", dst=dst, src=src, index=index)
+
+    dstptr = _tpu_tensor_region(dst, "w")
+    srcptr = _tpu_tensor_region(src, "r")
+    idxptr = _tpu_tensor_region(index, "r")
+    return T.call_extern("handle", "tl.tpu.scatter", dstptr, srcptr, idxptr)
+
+
+@T.macro
+def _scatter_add_impl(dst, src, indices, dim):
+    # Separate C=1 tiles keep both operands in the same NPU lane. A (2, W)
+    # tile distributes the rows across lanes and cannot supply a TIU add by
+    # treating the second row as a linear stride.c offset.
+    accumulator = T.alloc_shared((1, src.shape[1]), src.dtype)
+    source_row = T.alloc_shared((1, src.shape[1]), src.dtype)
+    T.call_extern("handle", "tl.tpukernel.scatter_add", _tpu_tensor_region(dst, "rw"),
+                  _tpu_tensor_region(src, "r"), _tpu_tensor_region(indices, "r"),
+                  _tpu_tensor_region(accumulator, "rw"), _tpu_tensor_region(source_row, "rw"), dim)
+
+
+def ppl_scatter_add(dst, src, indices, dim=0):
+    """Accumulate global rows as ``dst[indices[i]] += src[i]``.
+
+    All public operands are contiguous rank-2 global buffers. Source and
+    destination payloads must have the same FP16, BF16, or FP32 dtype and row
+    width. Indices have shape ``(src.shape[0], 1)`` and use INT32 or UINT32;
+    callers must keep every index in ``[0, dst.shape[0])``. Only ``dim=0`` is
+    supported. Duplicate indices accumulate in source-row order onto the
+    existing destination values. All three buffers must use distinct storage.
+
+    This TPU-Kernel-only composite allocates two local row tiles internally.
+    """
+    for name, buffer in (("dst", dst), ("src", src), ("indices", indices)):
+        _require_global_buffer(name, buffer)
+        _require_rank(name, buffer, 2)
+        _require_descriptor_shape(f"ppl_scatter_add {name}", buffer)
+    _require_dtype("dst", dst, _TPU_BASE_FLOAT_DTYPES)
+    _require_same_dtype("ppl_scatter_add payload", dst, src)
+    _require_dtype("indices", indices, {"int32", "uint32"})
+    _require_distinct_storage("ppl_scatter_add", dst=dst, src=src, indices=indices)
+    if isinstance(dim, bool) or not isinstance(dim, int):
+        raise TypeError("ppl_scatter_add dim must be a Python integer")
+    if dim != 0:
+        raise ValueError(f"ppl_scatter_add only supports dim=0, got {dim}")
+    try:
+        ir.assert_structural_equal(dst.shape[1], src.shape[1])
+        ir.assert_structural_equal(src.shape[0], indices.shape[0])
+        ir.assert_structural_equal(indices.shape[1], 1)
+    except ValueError as error:
+        raise ValueError("ppl_scatter_add expects dst=(rows, width), src=(count, width), "
+                         "and indices=(count, 1)") from error
+    return _scatter_add_impl(dst, src, indices, dim)
 
 
 def ppl_add_C(out, inp1, value):
@@ -886,7 +1084,7 @@ def _reduce_sum_impl(inp, out, dim, eu_elements):
         channel = T.int32(64)
         align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num
         stride = T.ceildiv(inp.shape[0], channel) * align_w
-        # Shared semantic ABI: TPU-Kernel uses padded pooling; RV uses column slices.
+        # Shared semantic ABI: each backend selects its validated pooling sequence.
         T.call_extern("handle", "tl.tpu.reduce_sum", _tpu_tensor_region(inp, "rw"),
                       _tpu_tensor_region(out, "w"), _tpu_tensor_region(tmp_buffer_sum, "rw"),
                       eu_num, align_w, stride)
@@ -914,8 +1112,9 @@ def ppl_reduce_sum(inp, out, dim):
 
     Dtype support:
         - TPU-Kernel: FP16, BF16, and FP32.
-        - RV Tensor: E4M3, E5M2, FP16, BF16, and FP32. FP8 accumulation rounds
-          after every same-format add.
+        - RV Tensor: FP16, BF16, and FP32. FP16/BF16 inputs are reduced in
+          FP32 chunks before conversion to the output dtype. NaN and infinity
+          propagate through this reduction.
     """
     for name, buffer in (("inp", inp), ("out", out)):
         _require_local_buffer(name, buffer)
@@ -947,7 +1146,7 @@ def _reduce_max_impl(inp, out, dim, eu_elements):
         channel = T.int32(64)
         align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num
         stride = T.ceildiv(inp.shape[0], channel) * align_w
-        # Shared semantic ABI: TPU-Kernel uses padded pooling; RV uses column slices.
+        # Shared semantic ABI: each backend selects its validated pooling sequence.
         T.call_extern("handle", "tl.tpu.reduce_max", _tpu_tensor_region(inp, "rw"),
                       _tpu_tensor_region(out, "w"), _tpu_tensor_region(tmp_buffer_max, "rw"),
                       eu_num, align_w, stride)
@@ -974,6 +1173,8 @@ def ppl_reduce_max(inp, out, dim):
         This operation always overwrites `out`.  Cross-tile accumulation must
         be expressed as a separate max operation; the TPU-Kernel reduction
         sequence does not consume the previous contents of `out`.
+        NaN propagation is unspecified; rows containing NaNs may produce
+        different results across backends or reduction widths.
 
     Dtype support:
         - TPU-Kernel: E4M3, E5M2, FP16, BF16, and FP32.
@@ -1012,6 +1213,6 @@ def ppl_embedding(out, weight, indices):
     No padding index, negative indexing, or training gradient is implied.
     """
     param_h = _static_positive_dim("ppl_embedding weight axis 0", weight.shape[0])
-    outptr, weightptr, indexptr = _prepare_row_gather("ppl_embedding", out, weight, indices,
-                                                      param_h)
+    outptr, weightptr, indexptr = _prepare_row_gather(
+        "ppl_embedding", out, weight, indices, param_h)
     return T.call_extern("handle", "tl.tpu.embedding", outptr, weightptr, indexptr, param_h)

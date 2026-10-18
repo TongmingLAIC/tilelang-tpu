@@ -17,7 +17,10 @@ from tpu_demo.common import DemoNumericalMismatch, comparison, validate_selectio
 from tpu_demo.elementwise import build_elementwise
 from tpu_demo.flashattn import build_flashattn
 from tpu_demo.flashattn.flashattn import _attention_mask, _reference, _validation_inputs
+from tpu_demo.gptq_w4a16 import build_gptq_w4a16
+from tpu_demo.llama_mlp import build_llama_mlp
 from tpu_demo.matmul import build_matmul
+from tpu_demo.paged_attention import build_paged_attention
 from tpu_demo.rmsnorm import build_rmsnorm, build_rmsnorm_splitk
 from tpu_demo.rope import build_rope
 from tpu_demo.swiglu import build_swiglu
@@ -25,7 +28,7 @@ from tpu_demo.swiglu import build_swiglu
 
 def test_registry_is_unique_complete_and_capability_scoped():
     cases = build_cases()
-    assert len(cases) == 73
+    assert len(cases) == 79
     assert len({case.case_id for case in cases}) == len(cases)
     assert sum(case.supports_rv for case in cases) == len(cases)
     assert set(OPERATIONS) == RV_SUPPORTED_OPERATIONS
@@ -56,6 +59,14 @@ def _build_case_kernel(case, programming_model):
         return build_swiglu(dtype=case.dtype)
     if case.operation == "flashattn":
         return build_flashattn(dtype=case.dtype)
+    if case.operation == "llama-mlp":
+        return build_llama_mlp(dtype=case.dtype, programming_model=programming_model)
+    if case.operation == "paged-attention":
+        program, _, _, _ = build_paged_attention(dtype=case.dtype,
+                                                programming_model=programming_model)
+        return program
+    if case.operation == "gptq-w4a16":
+        return build_gptq_w4a16(dtype=case.dtype, programming_model=programming_model)
     raise AssertionError(f"unhandled test operation: {case.operation}")
 
 
@@ -89,6 +100,9 @@ def test_kernel_variants_cover_only_distinct_frontend_expressions():
         "swiglu_fp32",
         "flashattn_low_precision",
         "flashattn_fp32",
+        "llama_mlp",
+        "paged_attention",
+        "gptq_w4a16",
     }
 
 

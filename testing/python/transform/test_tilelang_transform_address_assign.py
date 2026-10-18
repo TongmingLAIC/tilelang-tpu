@@ -17,9 +17,9 @@ BANK_SIZE = 16 * 1024
 LMEM_ADDRESS_ATTR_PREFIX = "tilelang.tpu.lmem.address."
 
 
-def _assigned_attrs(func):
+def _assigned_attrs(func, *, target_spec="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel"):
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
-    target = tvm.target.Target("tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
+    target = tvm.target.Target(target_spec)
     with contextlib.redirect_stdout(io.StringIO()):
         mod = LowerAndLegalize(mod, target)
         mod = OptimizeForTarget(mod, target)
@@ -205,6 +205,51 @@ def test_elementwise_reads_are_bank_separated_while_outputs_remain_flexible():
 
     assert src0_addr // BANK_SIZE != src1_addr // BANK_SIZE
     assert dst_addr // BANK_SIZE == src0_addr // BANK_SIZE
+
+
+def test_dq2_separates_packed_weight_and_scale_reads_without_a_dst_conflict():
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, is_cpu=True):
+            out = T.alloc_shared((64, 64), "float16")
+            packed = T.alloc_shared((64, 32), "uint8")
+            scale = T.alloc_shared((64, 2), "uint32")
+            T.ppl_dq2(out, packed, scale, 32)
+
+    attrs = _assigned_attrs(main)
+    read_banks = {_addr(attrs, "packed") // BANK_SIZE,
+                  _addr(attrs, "scale") // BANK_SIZE}
+    assert len(read_banks) == 2
+    assert _addr(attrs, "out") // BANK_SIZE in read_banks
+
+
+def test_rv_scatter_separates_local_source_and_index_reads():
+
+    @T.prim_func
+    def main(cache: T.Tensor((64, 128), "float16")):
+        with T.Kernel(1, is_cpu=True):
+            source = T.alloc_shared((64, 128), "float16")
+            index = T.alloc_shared((64, 1), "uint32")
+            T.ppl_scatter(cache, source, index)
+
+    attrs = _assigned_attrs(main, target_spec="tpu -mcpu=sg2260e -tpu-programming-model=rv")
+    assert _addr(attrs, "source") // BANK_SIZE != _addr(attrs, "index") // BANK_SIZE
+
+
+def test_scatter_add_preserves_distinct_internal_row_tiles():
+
+    @T.prim_func
+    def main(dst: T.Tensor((4, 32), "float16"),
+             src: T.Tensor((2, 32), "float16"),
+             indices: T.Tensor((2, 1), "int32")):
+        with T.Kernel(1, is_cpu=True):
+            T.ppl_scatter_add(dst, src, indices)
+
+    attrs = _assigned_attrs(main)
+    accumulator = _single_attr_with_prefix(attrs, "accumulator")
+    source_row = _single_attr_with_prefix(attrs, "source_row")
+    assert _addr(attrs, accumulator) // BANK_SIZE != _addr(attrs, source_row) // BANK_SIZE
 
 
 def test_reduce_tmp_is_separated_from_input_bank():

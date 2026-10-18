@@ -143,8 +143,13 @@ private:
   void EmitRVConstant(double value, const std::string &dtype);
   void EmitRVScalar(const std::string &operation, const std::string &dst,
                     const std::string &src, DataType dtype, double value);
+  // KV-cache write for paged attention: scatter local rows into a global cache
+  // using an index table.
+  void EmitRVScatter(const std::string &dst, const std::string &src,
+                     const std::string &index, DataType dtype);
   void EmitRVReduction(const std::string &operation, const std::string &src,
-                       const std::string &dst, DataType dtype, int width);
+                       const std::string &dst, const std::string &scratch,
+                       DataType dtype, int width);
   void EmitRVExp(const std::string &dst, const std::string &work0,
                  const std::string &work1, DataType dtype);
   void EmitRVDescriptor(const std::string &tensor, int register_id,

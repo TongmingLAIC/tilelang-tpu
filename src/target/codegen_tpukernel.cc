@@ -433,6 +433,227 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
                  << ".addr, " << tensors[1] << ".addr, " << tensors[2]
                  << ".addr, " << tensors[3] << ".addr, &" << tensors[0]
                  << ".shape, " << dtype_name << ");\n";
+  } else if (op_name == "tl.tpu.dq2") {
+    ICHECK_EQ(op->args.size(), 5U)
+        << op_name << " expects dst, packed weights, offset_scale, and gsize";
+    auto dst_operand = ParseWholeBufferRegion(op->args[1], op_name + " dst", 2);
+    auto packed_operand =
+        ParseWholeBufferRegion(op->args[2], op_name + " src", 1);
+    auto scale_operand =
+        ParseWholeBufferRegion(op->args[3], op_name + " offset_scale", 1);
+    ICHECK(dst_operand.is_local && packed_operand.is_local &&
+           scale_operand.is_local)
+        << op_name << " operands must all reside in local memory";
+    ICHECK(dst_operand.data_var != packed_operand.data_var &&
+           dst_operand.data_var != scale_operand.data_var &&
+           packed_operand.data_var != scale_operand.data_var)
+        << op_name << " requires distinct dst, src, and offset_scale storage";
+    ICHECK(dst_operand.dtype == DataType::Float(16) ||
+           dst_operand.dtype == DataType::BFloat(16))
+        << op_name << " dst must be FP16 or BF16, got " << dst_operand.dtype;
+    ICHECK(packed_operand.dtype == DataType::UInt(8))
+        << op_name
+        << " src must be UINT8 holding two 4-bit weights per element, got "
+        << packed_operand.dtype;
+    ICHECK(scale_operand.dtype == DataType::UInt(32))
+        << op_name
+        << " offset_scale must be UINT32 (low 16 bits offset, high 16 bits "
+           "scale, both FP16), got "
+        << scale_operand.dtype;
+    for (const auto *operand : {&dst_operand, &packed_operand, &scale_operand}) {
+      ICHECK_EQ(operand->rank, 2U)
+          << op_name << " requires rank-2 dst, src, and offset_scale";
+    }
+    const auto *gsize_node = op->args[4].as<IntImmNode>();
+    ICHECK(gsize_node) << op_name << " requires a compile-time integer gsize";
+    const int64_t gsize = gsize_node->value;
+    ICHECK_GT(gsize, 0) << op_name << " requires a positive gsize";
+    const int64_t k_extent = dst_operand.shape4[3];
+    ICHECK_EQ(packed_operand.shape4[3] * 2, k_extent)
+        << op_name
+        << " src packs two 4-bit weights per byte, so its W extent must be "
+           "half of dst's";
+    ICHECK_EQ(k_extent % gsize, 0)
+        << op_name << " requires gsize to divide the dst W extent";
+    ICHECK_EQ(scale_operand.shape4[3], k_extent / gsize)
+        << op_name
+        << " offset_scale must carry exactly one packed word per group";
+    ICHECK(dst_operand.shape4[1] == packed_operand.shape4[1] &&
+           dst_operand.shape4[1] == scale_operand.shape4[1])
+        << op_name << " requires dst, src, and offset_scale to share the N "
+                       "extent";
+    // The standalone dequantize this needs exists in the TPU-Kernel layer and
+    // NOT in the RV layer.  `tpu_bdc_f16_group_dequant` is the instruction the
+    // firmware's own Llama MLP uses on this chip (see
+    // nodechip_llama_mlp_multi_core.c.o's undefined reference to it), and it is
+    // what PPL lowers `tiu::dq2` to on chips whose RV backend implements it
+    // (verified against a bm1684xe build of w4a16_matmul_dq2.pl).
+    //
+    // Do NOT lower this to `rvt_dq2`, even though the symbol exists in
+    // libfirmware_core.a: PPL's RV backend emits an unconditional assert for
+    // `tiu::dq2` ("Chip have no instruction like DQ2Op"), and emitting
+    // `rvt_dq2` directly blocks the device forever in
+    // rt_task_done_response_sync, wedging the card until it is re-modprobed.
+    ICHECK_EQ(target_programming_model_, "tpukernel")
+        << op_name
+        << " is TPU-Kernel-only on this chip. PPL's RV backend has no tiu::dq2 "
+           "lowering and a direct rvt_dq2 emission hangs the device; build with "
+           "-tpu-programming-model=tpukernel instead.";
+    // Mirrors the guard the reference build emits before the call.
+    ICHECK(gsize == 32 || gsize == 64 || gsize == 128 || gsize == 256)
+        << op_name << " requires gsize to be 32, 64, 128, or 256, got " << gsize;
+    // Argument order and the DT_UINT4 src type follow the reference call:
+    //   tpu_bdc_f16_group_dequant(dst, src, quant, &shape, src_dtype,
+    //                             dst_dtype, group)
+    // The shape is taken from dst (W = the unpacked element count).
+    PrintIndent();
+    this->stream << "tpu_bdc_f16_group_dequant(" << dst_operand.descriptor
+                 << ".addr, " << packed_operand.descriptor << ".addr, "
+                 << scale_operand.descriptor << ".addr, &"
+                 << dst_operand.descriptor << ".shape, DT_UINT4, "
+                 << TPUKernelDTypeName(dst_operand.dtype) << ", " << gsize
+                 << ");\n";
+  } else if (op_name == "tl.tpu.scatter") {
+    ICHECK_EQ(op->args.size(), 4U)
+        << op_name << " expects dst, src, and an index table";
+    auto dst_operand = ParseWholeBufferRegion(op->args[1], op_name + " dst", 2);
+    auto src_operand = ParseWholeBufferRegion(op->args[2], op_name + " src", 1);
+    auto idx_operand =
+        ParseWholeBufferRegion(op->args[3], op_name + " index", 1);
+    ICHECK(!dst_operand.is_local)
+        << op_name << " dst must be a global tensor -- it is the paged cache";
+    ICHECK(src_operand.is_local && idx_operand.is_local)
+        << op_name << " src and index must reside in local memory";
+    ICHECK(dst_operand.dtype == DataType::Float(16) ||
+           dst_operand.dtype == DataType::BFloat(16))
+        << op_name << " dst must be FP16 or BF16, got " << dst_operand.dtype;
+    ICHECK_EQ(src_operand.dtype, dst_operand.dtype)
+        << op_name << " requires matching dst/src dtypes";
+    ICHECK(idx_operand.dtype == DataType::UInt(32))
+        << op_name << " index table must be UINT32, got " << idx_operand.dtype;
+    ICHECK(dst_operand.data_var != src_operand.data_var &&
+           dst_operand.data_var != idx_operand.data_var &&
+           src_operand.data_var != idx_operand.data_var)
+        << op_name << " requires distinct dst, src, and index storage";
+    // Only the RV backend has a lowering for this on the target chip; the
+    // TPU-Kernel layer's equivalent lives inside its fused attention kernels.
+    ICHECK_EQ(target_programming_model_, "rv")
+        << op_name
+        << " has only an RV lowering; build with -tpu-programming-model=rv";
+    EmitRVScatter(dst_operand.descriptor, src_operand.descriptor,
+                  idx_operand.descriptor, dst_operand.dtype);
+  } else if (op_name == "tl.tpukernel.scatter_add") {
+    ICHECK_EQ(target_programming_model_, "tpukernel")
+        << op_name << " requires target tpu-programming-model=tpukernel";
+    ICHECK_EQ(op->args.size(), 7U)
+        << op_name << " expects dst, src, indices, two local row tiles, and dim";
+    constexpr std::array<int, 5> kAccessMasks = {3, 1, 1, 3, 3};
+    std::array<SemanticTensorOperand, 5> operands{};
+    for (size_t i = 0; i < operands.size(); ++i) {
+      operands[i] = ParseWholeBufferRegion(
+          op->args[i + 1], op_name + " operand " + std::to_string(i),
+          kAccessMasks[i]);
+      ICHECK_EQ(operands[i].rank, 2U)
+          << op_name << " requires rank-2 buffers";
+      ICHECK_EQ(operands[i].is_local, i >= 3)
+          << op_name << " requires global dst/src/indices and local row tiles";
+      for (size_t j = 0; j < i; ++j) {
+        ICHECK(operands[i].data_var != operands[j].data_var)
+            << op_name << " requires distinct storage for every operand";
+      }
+    }
+    const auto *dim = op->args[6].as<IntImmNode>();
+    ICHECK(dim && dim->dtype.is_int() && dim->value == 0)
+        << op_name << " only supports compile-time dim=0";
+    const DataType dtype = operands[0].dtype;
+    ICHECK(dtype == DataType::Float(16) || dtype == DataType::BFloat(16) ||
+           dtype == DataType::Float(32))
+        << op_name << " supports only FP16, BF16, and FP32 payloads";
+    ICHECK_EQ(operands[1].dtype, dtype)
+        << op_name << " requires matching dst/src dtypes";
+    ICHECK(operands[2].dtype == DataType::Int(32) ||
+           operands[2].dtype == DataType::UInt(32))
+        << op_name << " requires INT32 or UINT32 indices";
+    const int rows = operands[1].shape4[1];
+    const int width = operands[1].shape4[3];
+    ICHECK_EQ(operands[0].shape4[3], width)
+        << op_name << " requires matching dst/src row widths";
+    ICHECK_EQ(operands[2].shape4[1], rows)
+        << op_name << " requires one index per source row";
+    ICHECK_EQ(operands[2].shape4[3], 1)
+        << op_name << " indices must have shape (count, 1)";
+    for (size_t i = 3; i < operands.size(); ++i) {
+      ICHECK_EQ(operands[i].dtype, dtype)
+          << op_name << " row tiles must match the payload dtype";
+      ICHECK(operands[i].shape4 == std::vector<int>({1, 1, 1, width}))
+          << op_name << " local row tiles must have shape (1, width)";
+    }
+    constexpr int64_t kLocalMemBytes =
+        tl::tpuv7::kBankNum * tl::tpuv7::kBankSize;
+    ICHECK_EQ(buffer_addrs_.at(operands[3].data_var) / kLocalMemBytes,
+              buffer_addrs_.at(operands[4].data_var) / kLocalMemBytes)
+        << op_name << " local row tiles must start in the same NPU lane";
+
+    const std::string &dst = operands[0].descriptor;
+    const std::string &src = operands[1].descriptor;
+    const std::string &indices = operands[2].descriptor;
+    const std::string &accumulator = operands[3].descriptor;
+    const std::string &source_row = operands[4].descriptor;
+    const std::string dtype_name = TPUKernelDTypeName(dtype);
+    const int64_t bytes = tl::tpuv7::DTypeBytes(dtype);
+    const std::string destination_shape = name_supply_->FreshName("scatter_dst_shape");
+    const std::string destination_stride = name_supply_->FreshName("scatter_dst_stride");
+    const std::string row_shape = name_supply_->FreshName("scatter_row_shape");
+    const std::string row = name_supply_->FreshName("scatter_i");
+    this->PrintIndent();
+    this->stream << "{\n";
+    this->PrintIndent();
+    this->stream << "dim4 " << destination_shape << " = {1, 1, "
+                 << operands[0].shape4[1] << ", " << width << "};\n";
+    this->PrintIndent();
+    this->stream << "dim4 " << destination_stride << " = {"
+                 << static_cast<int64_t>(operands[0].shape4[1]) * width
+                 << ", "
+                 << static_cast<int64_t>(operands[0].shape4[1]) * width
+                 << ", " << width << ", 1};\n";
+    this->PrintIndent();
+    this->stream << "dim4 " << row_shape << " = {1, 1, 1, " << width << "};\n";
+    this->PrintIndent();
+    this->stream << "for (int " << row << " = 0; " << row << " < " << rows
+                 << "; ++" << row << ") {\n";
+    this->PrintIndent();
+    this->stream << "  tpu_gdma_cpy_S2L(" << source_row << ".addr, " << src
+                 << ".addr + (global_addr_t)" << row << " * " << width * bytes
+                 << ", &" << row_shape << ", &" << source_row
+                 << ".stride, NULL, " << dtype_name << ");\n";
+    this->PrintIndent();
+    this->stream << "  tpu_gdma_h_gather_S2L(" << accumulator << ".addr, "
+                 << dst << ".addr, " << indices
+                 << ".addr + (global_addr_t)" << row << " * 4, false, "
+                    "(scalar_t){.u32 = 0}, &" << row_shape << ", "
+                 << operands[0].shape4[1] << ", &" << accumulator
+                 << ".stride, &" << destination_stride << ", NULL, " << dtype_name
+                 << ");\n";
+    this->PrintIndent();
+    this->stream << "  tpu_bdc_fp_add(" << accumulator << ".addr, "
+                 << accumulator << ".addr, " << source_row
+                 << ".addr, &" << row_shape << ", &" << accumulator
+                 << ".stride, &" << accumulator << ".stride, &" << source_row
+                 << ".stride, " << dtype_name << ");\n";
+    this->PrintIndent();
+    this->stream << "  tpu_gdma_h_scatter_L2S(" << dst << ".addr, "
+                 << accumulator << ".addr, " << indices
+                 << ".addr + (global_addr_t)" << row << " * 4, false, &"
+                 << destination_shape << ", 1, &" << destination_stride << ", &"
+                 << accumulator << ".stride, NULL, " << dtype_name << ");\n";
+    // The next row may gather this same destination index and reuse both
+    // scratch tiles. Complete the update before that read-modify-write cycle.
+    this->PrintIndent();
+    this->stream << "  tpu_poll();\n";
+    this->PrintIndent();
+    this->stream << "}\n";
+    this->PrintIndent();
+    this->stream << "}\n";
   } else if (op_name == "tl.tpu.reduce_max") {
     ICHECK_EQ(op->args.size(), 7U)
         << op_name
@@ -515,7 +736,7 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     ICHECK_EQ(tmp_shape[1], expected_eu)
         << op_name << " scratch width must equal the dtype-specific EU size";
     if (target_programming_model_ == "rv") {
-      EmitRVReduction("max", input_tensor, output_tensor, dtype_,
+      EmitRVReduction("max", input_tensor, output_tensor, tmp_tensor, dtype_,
                       input_shape[1]);
       return true;
     }
@@ -723,12 +944,12 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     ICHECK(dtype_ == DataType::Float(16) ||
            dtype_ == DataType::BFloat(16) ||
            dtype_ == DataType::Float(32) || is_fp8)
-        << op_name << " supports FP8, FP16, BF16, and FP32, got " << dtype_;
-    if (is_fp8 && target_programming_model_ != "rv") {
+        << op_name << " supports FP16, BF16, and FP32, got " << dtype_;
+    if (is_fp8) {
       throw tvm::runtime::Error(
           op_name +
-          " supports FP8 only with RV Tensor; TPU-Kernel supports FP16, "
-          "BF16, and FP32");
+          " does not support FP8 on TPU-Kernel or RV Tensor; convert to "
+          "FP16, BF16, or FP32 before reduction");
     }
     std::string dtype, dtype_2;
     if (dtype_ == DataType::Float(16)) {
@@ -775,7 +996,7 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     ICHECK_EQ(tmp_shape[1], expected_eu)
         << op_name << " scratch width must equal the dtype-specific EU size";
     if (target_programming_model_ == "rv") {
-      EmitRVReduction("sum", input_tensor, output_tensor, dtype_,
+      EmitRVReduction("sum", input_tensor, output_tensor, tmp_tensor, dtype_,
                       input_shape[1]);
       return true;
     }
@@ -987,8 +1208,17 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
       operands[i] = ParseWholeBufferRegion(
           op->args[i + 1], op_name + " operand " + std::to_string(i),
           kAccessMasks[i]);
+      // The instruction encoding can name a local destination, and the
+      // vendor's own lowering does set up the register-8 base plus
+      // register-9 view pair for it.  Reproducing that here still produced
+      // NaNs at every size tried, while the global form stays exact, so the
+      // difference is somewhere this path does not model -- most likely the
+      // LMEM base that the PPL allocator assigns.  Reject it loudly instead
+      // of emitting a silently wrong kernel.
       ICHECK(!operands[i].is_local)
-          << op_name << " uses the S2S API and requires global-memory operands";
+          << op_name << " requires global-memory operands; a local destination "
+                        "is not supported yet (see EmitRVScatter for the "
+                        "working local-descriptor pattern)";
       tensors[i] = operands[i].descriptor;
       ICHECK_EQ(operands[i].rank, 2U)
           << op_name << " requires rank-2 output, param, and index buffers";
@@ -1009,12 +1239,18 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
         << op_name << " output and param dtypes must match";
     ICHECK_EQ(operands[2].dtype, DataType::UInt(32))
         << op_name << " index dtype must be uint32";
-    ICHECK(dtype_ == DataType::Float(16) || dtype_ == DataType::Float(32) ||
+    const bool uint32_gather = op_name == "tl.tpukernel.gather" &&
+                               target_programming_model_ == "tpukernel" &&
+                               dtype_ == DataType::UInt(32);
+    ICHECK(uint32_gather || dtype_ == DataType::Float(16) || dtype_ == DataType::Float(32) ||
            dtype_ == DataType::BFloat(16) || dtype_.is_e4m3_float8() ||
            dtype_.is_e5m2_float8())
-        << op_name << " supports FP8, FP16, BF16, or FP32 payloads, got "
+        << op_name
+        << (op_name == "tl.tpukernel.gather"
+                ? " supports FP8, FP16, BF16, FP32, or UINT32 payloads, got "
+                : " supports FP8, FP16, BF16, or FP32 payloads, got ")
         << dtype_;
-    const std::string dtype = TPUKernelDTypeName(dtype_);
+    const std::string dtype = uint32_gather ? "DT_UINT32" : TPUKernelDTypeName(dtype_);
     ICHECK_EQ(dst_shape[0], 1);
     ICHECK_EQ(dst_shape[2], 1);
     ICHECK_EQ(param_shape[0], 1);
@@ -1080,12 +1316,14 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
       operands[i] = ParseWholeBufferRegion(
           op->args[i + 1], op_name + " operand " + std::to_string(i),
           kAccessMasks[i]);
-      ICHECK(!operands[i].is_local)
-          << op_name
-          << " uses the HAU system-memory API and requires global operands";
       tensors[i] = operands[i].descriptor;
-      ICHECK_EQ(operands[i].rank, 1U)
-          << op_name << " requires rank-1 dst_data, dst_idx, and src buffers";
+    }
+    const bool local_rows = operands[2].is_local;
+    for (const auto &operand : operands) {
+      ICHECK_EQ(operand.is_local, local_rows)
+          << op_name << " requires either all-global or all-local operands";
+      ICHECK_EQ(operand.rank, local_rows ? 2U : 1U)
+          << op_name << " requires rank-1 global vectors or rank-2 local tiles";
     }
     ICHECK(operands[0].data_var != operands[1].data_var &&
            operands[0].data_var != operands[2].data_var &&
@@ -1106,8 +1344,9 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     auto dtype_ = operands[0].dtype;
     ICHECK_EQ(operands[2].dtype, dtype_)
         << op_name << " dst_data and src dtypes must match";
-    ICHECK_EQ(operands[1].dtype, DataType::Int(32))
-        << op_name << " dst_idx dtype must be int32";
+    ICHECK(operands[1].dtype == DataType::Int(32) ||
+           (local_rows && operands[1].dtype == DataType::UInt(32)))
+        << op_name << " dst_idx dtype must be int32 (or uint32 for local tiles)";
     std::string dtype;
     // tpu_hau_sort_natural_index supports FP32, INT32, and UINT32 only.
     if (dtype_ == DataType::Float(32)) {
@@ -1124,6 +1363,91 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     const auto &dst_data_shape = operands[0].shape4;
     const auto &dst_idx_shape = operands[1].shape4;
     const auto &src_shape = operands[2].shape4;
+    const std::string &dst_data = tensors[0];
+    const std::string &dst_idx = tensors[1];
+    const std::string &src = tensors[2];
+    if (local_rows) {
+      ICHECK_EQ(dtype_, DataType::Float(32))
+          << op_name << " local row-wise selection requires FP32 values";
+      ICHECK_EQ(src_shape[3], length_val)
+          << op_name << " length must match the local source row width";
+      ICHECK_EQ(dst_data_shape[1], src_shape[1])
+          << op_name << " local source and output row counts must match";
+      ICHECK(dst_data_shape == dst_idx_shape)
+          << op_name << " local value and index outputs must have matching shapes";
+      ICHECK(dst_data_shape[3] == K_val || dst_data_shape[3] == length_val)
+          << op_name << " local output width must equal K or length";
+
+      const std::string row = name_supply_->FreshName("topk_row");
+      const std::string l2_input = name_supply_->FreshName("topk_l2_input");
+      const std::string l2_values = name_supply_->FreshName("topk_l2_values");
+      const std::string l2_indices = name_supply_->FreshName("topk_l2_indices");
+      const std::string input_shape = name_supply_->FreshName("topk_input_shape");
+      const std::string output_shape = name_supply_->FreshName("topk_output_shape");
+      auto row_addr = [&](const std::string &tensor) {
+        const std::string channel =
+            "(tpu_npu_index(" + tensor + ".addr) + " + row + ")";
+        return "((" + channel + " % NPU_NUM) * LOCAL_MEM_SIZE + (" + tensor +
+               ".addr % LOCAL_MEM_SIZE) + (" + channel + " / NPU_NUM) * " +
+               tensor + ".stride.c * 4)";
+      };
+      const int64_t input_bytes = ((length_val * 4 + 63) / 64) * 64;
+      const int64_t output_bytes = ((K_val * 4 + 63) / 64) * 64;
+      const char *index_dtype = operands[1].dtype == DataType::UInt(32)
+                                    ? "DT_UINT32"
+                                    : "DT_INT32";
+      // HAU uses system memory. Reuse three disjoint L2 rows only after all
+      // consumers have completed; source/output rows themselves stay in LMEM.
+      PrintIndent();
+      stream << "{\n";
+      PrintIndent();
+      stream << "TPUKERNEL_ASSERT_INFO(" << input_bytes + 2 * output_bytes
+             << " <= tpu_l2_sram_size(), "
+                "\"TileLang Top-K L2 scratch exceeds capacity\\n\");\n";
+      PrintIndent();
+      stream << "system_addr_t " << l2_input
+             << " = tpu_l2_sram_get_start_addr();\n";
+      PrintIndent();
+      stream << "system_addr_t " << l2_values << " = " << l2_input << " + "
+             << input_bytes << ";\n";
+      PrintIndent();
+      stream << "system_addr_t " << l2_indices << " = " << l2_values << " + "
+             << output_bytes << ";\n";
+      PrintIndent();
+      stream << "dim4 " << input_shape << " = {1, 1, 1, " << length_val << "};\n";
+      PrintIndent();
+      stream << "dim4 " << output_shape << " = {1, 1, 1, " << K_val << "};\n";
+      PrintIndent();
+      stream << "for (int " << row << " = 0; " << row << " < " << src_shape[1]
+             << "; ++" << row << ") {\n";
+      PrintIndent();
+      stream << "  tpu_gdma_cpy_L2S(" << l2_input << ", " << row_addr(src)
+             << ", &" << input_shape << ", NULL, &" << src
+             << ".stride, DT_FP32);\n";
+      PrintIndent();
+      stream << "  tpu_poll();\n";
+      PrintIndent();
+      stream << "  tpu_hau_sort_natural_index(" << l2_values << ", "
+             << l2_indices << ", " << l2_input << ", " << length_val << ", " << K_val << ", "
+             << (descended_val ? "true" : "false") << ", DT_FP32);\n";
+      PrintIndent();
+      stream << "  tpu_poll();\n";
+      PrintIndent();
+      stream << "  tpu_gdma_cpy_S2L(" << row_addr(dst_data)
+             << ", " << l2_values << ", &" << output_shape << ", &" << dst_data
+             << ".stride, NULL, DT_FP32);\n";
+      PrintIndent();
+      stream << "  tpu_gdma_cpy_S2L(" << row_addr(dst_idx)
+             << ", " << l2_indices << ", &" << output_shape << ", &" << dst_idx
+             << ".stride, NULL, " << index_dtype << ");\n";
+      PrintIndent();
+      stream << "  tpu_poll();\n";
+      PrintIndent();
+      stream << "}\n";
+      PrintIndent();
+      stream << "}\n";
+      return true;
+    }
     auto require_vector_shape = [&](const std::vector<int> &shape,
                                     int64_t expected, const char *operand) {
       ICHECK_EQ(shape.size(), 4U);
@@ -1141,15 +1465,17 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     require_vector_shape(dst_data_shape, K_val, "dst_data");
     require_vector_shape(dst_idx_shape, K_val, "dst_idx");
 
-    const std::string &dst_data = tensors[0];
-    const std::string &dst_idx = tensors[1];
-    const std::string &src = tensors[2];
-
+    // HAU does not inherit DMA completion merely from C call order. The
+    // source may have been produced by an earlier global copy in this kernel.
+    this->PrintIndent();
+    this->stream << "tpu_poll();\n";
     this->PrintIndent();
     this->stream << "tpu_hau_sort_natural_index(" << dst_data << ".addr, "
                  << dst_idx << ".addr, " << src << ".addr, " << length_val
                  << ", " << K_val << ", " << (descended_val ? "true" : "false")
                  << ", " << dtype << ");\n";
+    this->PrintIndent();
+    this->stream << "tpu_poll();\n";
   } else {
     return false;
   }

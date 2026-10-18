@@ -331,12 +331,12 @@ def test_validate_args_accepts_only_explicit_promoted_pcie_scope():
     matrix._validate_args(_args("pcie", programming_model="rv", cases=None, all_pcie_cases=True))
 
 
-def test_default_fp8_cases_are_programming_model_specific():
+def test_default_fp8_cases_exclude_unsupported_reduce_sum():
     tpukernel = matrix._selected_cases(_args(cases=None))
     rv = matrix._selected_cases(_args(cases=None, programming_model="rv"))
     assert "reduce-max" in tpukernel
     assert "reduce-sum" not in tpukernel
-    assert "reduce-sum" in rv
+    assert "reduce-sum" not in rv
     with pytest.raises(RuntimeError, match="no validated FP8 implementation"):
         matrix._validate_args(_args(cases=["reduce-sum"]))
 
@@ -506,42 +506,6 @@ def test_pcie_promotion_accepts_same_clean_source_and_content_toolchain(
     assert evidence["validated_case_count"] == 1
     assert len(evidence["bm1690_summary_sha256"]) == 64
     assert len(evidence["sg2260e_summary_sha256"]) == 64
-
-
-def test_rv_promotion_requires_sg_evidence_but_not_unsupported_bm_reduce_sum(
-        monkeypatch, tmp_path):
-    fixture = _promotion_fixture(monkeypatch, tmp_path, "rv")
-    reduce_sum_key = "sg2260e/rv/e4m3/reduce-sum"
-    fixture.sg["scheduled"].append({
-        "chip": "sg2260e",
-        "programming_model": "rv",
-        "dtype": "e4m3",
-        "case": "reduce-sum",
-    })
-    fixture.sg["cases"][reduce_sum_key] = {
-        "status": "passed",
-        "raw_instruction_count": 1,
-        "numeric": _fp8_worker_payload(
-            programming_model="rv",
-            case="reduce-sum",
-        ),
-    }
-    for field in ("scheduled_case_count", "completed_case_count", "passed_case_count"):
-        fixture.sg[field] = 2
-    fixture.sg_path.write_text(json.dumps(fixture.sg), encoding="utf-8")
-
-    evidence = matrix._validate_pcie_promotion(
-        tmp_path,
-        fixture.args,
-        ("e4m3",),
-        ("copy", "reduce-sum"),
-        _toolchain_identity("pcie"),
-        "2026-09-08T00:04:00+00:00",
-    )
-
-    assert evidence["validated_case_count"] == 2
-    assert evidence["bm1690_validated_case_count"] == 1
-    assert evidence["sg2260e_validated_case_count"] == 2
 
 
 @pytest.mark.parametrize("failure", ("missing", "source", "toolchain", "raw", "numeric"))

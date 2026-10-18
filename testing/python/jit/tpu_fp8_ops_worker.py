@@ -317,11 +317,8 @@ def _run_reduction(operation: str, dtype: str, torch_dtype: torch.dtype, chip: s
     output = torch.zeros((rows, 1), dtype=torch_dtype)
     _compile(reduction_kernel, chip, runtime_mode)(source, output)
     if operation == "sum":
-        # RV maps the reduction to a deterministic chain of same-dtype adds;
-        # model the required FP8 rounding after each instruction.
-        expected = torch.zeros((rows, 1), dtype=torch_dtype)
-        for column in range(width):
-            expected = (expected.float() + source[:, column:column + 1].float()).to(torch_dtype)
+        # RV pooling accumulates the window before converting to FP8 output.
+        expected = source.float().sum(dim=1, keepdim=True).to(torch_dtype)
     else:
         expected = torch.max(source.float(), dim=1, keepdim=True).values.to(torch_dtype)
     if operation == "max":

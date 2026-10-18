@@ -84,6 +84,8 @@ _PORTABLE_TPU_EXTERNS = frozenset({
     "tl.tpu.reduce_sum",
     "tl.tpu.reduce_max",
     "tl.tpu.exp",
+    "tl.tpu.dq2",
+    "tl.tpu.scatter",
     "tl.tpu.add",
     "tl.tpu.copy",
     "tl.tpu.div",
@@ -95,6 +97,7 @@ _PORTABLE_TPU_EXTERNS = frozenset({
 })
 _TPUKERNEL_EXTERNS = frozenset({
     "tl.tpukernel.gather",
+    "tl.tpukernel.scatter_add",
     "tl.tpukernel.topk",
     "tl.tpukernel.parallel_start",
     "tl.tpukernel.parallel_end",
@@ -203,10 +206,16 @@ _TPU_SEMANTIC_REGION_ARGS = {
     "tl.tpu.mul_scalar": (1, 2),
     "tl.tpu.exp": (1, 2, 3, 4),
     "tl.tpukernel.gather": (1, 2, 3),
+    "tl.tpukernel.scatter_add": (1, 2, 3, 4, 5),
     "tl.tpukernel.topk": (1, 2, 3),
     "tl.tpu.rsqrt": (1, 2),
     "tl.tpu.reduce_sum": (1, 2, 3),
     "tl.tpu.reduce_max": (1, 2, 3),
+    # dq2: dst, packed weights, and the packed offset|scale table are tensor
+    # regions; argument 4 is the scalar group size.
+    "tl.tpu.dq2": (1, 2, 3),
+    # scatter: global destination, local source tile, local index table
+    "tl.tpu.scatter": (1, 2, 3),
 }
 
 # CUDA/HIP synchronization has no implicit TPU meaning.  Some operations have

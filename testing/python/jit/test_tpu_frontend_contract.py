@@ -504,7 +504,7 @@ def test_unvalidated_fp8_operations_fail_at_frontend(operation):
     (
         ("bm1690", "tpukernel", "tpu_bdc_fp_max_pool2d("),
         ("sg2260e", "tpukernel", "tpu_bdc_fp_max_pool2d("),
-        ("sg2260e", "rv", "rvt_fmax(10, 10, 8);"),
+        ("sg2260e", "rv", "rvt_pool_fmax(10, 8);"),
     ),
 )
 @pytest.mark.parametrize("dtype", ("e4m3_float8", "e5m2_float8"))
@@ -525,8 +525,43 @@ def test_fp8_reduce_max_selects_validated_backend(chip, programming_model, instr
     assert instruction in source
 
 
+@pytest.mark.parametrize("reduction", (T.ppl_reduce_sum, T.ppl_reduce_max))
+@pytest.mark.parametrize("dtype", ("float16", "bfloat16", "float32"))
+@pytest.mark.parametrize("width", (1, 65, 4096))
+def test_rv_reduction_selects_validated_instruction_sequence(reduction, dtype, width):
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, is_cpu=True) as _:
+            source = T.alloc_shared((4, width), dtype)
+            output = T.alloc_shared((4, 1), dtype)
+            reduction(source, output, dim=1)
+
+    source = tilelang.lower(
+        kernel,
+        target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
+        runtime_mode="cmodel",
+    ).kernel_source
+    low_precision_sum = reduction is T.ppl_reduce_sum and dtype != "float32"
+    if low_precision_sum:
+        instruction = "rvt_pool_favg(9, 10, 1, 0);"
+        assert "rvt_cfg_stencil(1, 16, 1, 1, false, false);" in source
+        assert "rv_offset += 16" in source
+        assert "rvt_cvt_f2f(11, 8);" in source
+        assert "rvt_fadd(10, 10, 11);" in source
+        assert "rvt_cfg_satu(0, false);\nrvt_cvt_f2f(10, 9);" in source
+    else:
+        instruction = ("rvt_pool_favg(10, 8, 1, 0);" if reduction is T.ppl_reduce_sum
+                       else "rvt_pool_fmax(10, 8);")
+        assert f"rvt_cfg_stencil(1, {width}, 1, 1, false, false);" in source
+    assert source.count(instruction) == 1
+    assert "rvt_cfg_pad(0," in source
+    assert "rvt_cfg_insrt(0, 0, 0, 0," in source
+    assert "rv_column" not in source
+
+
 @pytest.mark.parametrize("dtype", ("e4m3_float8", "e5m2_float8"))
-def test_fp8_reduce_sum_is_available_only_to_rv(dtype):
+def test_fp8_reduce_sum_is_rejected_until_wide_pooling_is_supported(dtype):
 
     @T.prim_func
     def kernel():
@@ -535,14 +570,12 @@ def test_fp8_reduce_sum_is_available_only_to_rv(dtype):
             output = T.alloc_shared((4, 1), dtype)
             T.ppl_reduce_sum(source, output, dim=1)
 
-    rv_source = tilelang.lower(
-        kernel,
-        target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
-        runtime_mode="cmodel",
-    ).kernel_source
-    assert "rvt_fadd(10, 10, 8);" in rv_source
-    with pytest.raises(tvm.error.TVMError, match="supports FP8 only with RV Tensor"):
-        tilelang.lower(kernel, target=_target("bm1690"), runtime_mode="cmodel")
+    for target in (
+        "tpu -mcpu=sg2260e -tpu-programming-model=rv",
+        _target("bm1690"),
+    ):
+        with pytest.raises(tvm.error.TVMError, match="does not support FP8"):
+            tilelang.lower(kernel, target=target, runtime_mode="cmodel")
 
 
 @pytest.mark.parametrize(

@@ -17,6 +17,8 @@ _PORTABLE_EXTERNS = {
     "tl.tpu.reduce_sum",
     "tl.tpu.reduce_max",
     "tl.tpu.exp",
+    "tl.tpu.dq2",
+    "tl.tpu.scatter",
     "tl.tpu.add",
     "tl.tpu.copy",
     "tl.tpu.div",
@@ -28,6 +30,7 @@ _PORTABLE_EXTERNS = {
 }
 _TPUKERNEL_EXTERNS = {
     "tl.tpukernel.gather",
+    "tl.tpukernel.scatter_add",
     "tl.tpukernel.topk",
     "tl.tpukernel.parallel_start",
     "tl.tpukernel.parallel_end",
@@ -37,6 +40,8 @@ _TPUKERNEL_COMMAND_EXTERNS = {
     "tl.tpukernel.parallel_end",
 }
 _PORTABLE_IMPLEMENTED_IN_TPUKERNEL = {
+    "tl.tpu.dq2",
+    "tl.tpu.scatter",
     "tl.tpu.embedding",
     "tl.tpu.add_scalar",
     "tl.tpu.mul_scalar",

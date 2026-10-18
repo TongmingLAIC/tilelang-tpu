@@ -1094,6 +1094,16 @@ private:
                op_name == "tl.tpu.add_scalar" || op_name == "tl.tpu.rsqrt") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
+    } else if (op_name == "tl.tpu.dq2" || op_name == "tl.tpu.scatter") {
+      mark_arg(1, BufferAccessKind::kWrite);
+      mark_arg(2, BufferAccessKind::kRead);
+      mark_arg(3, BufferAccessKind::kRead);
+    } else if (op_name == "tl.tpukernel.scatter_add") {
+      // This opaque composite repeatedly loads, adds, and stores rows. Its
+      // two internal local tiles are both read and written by that sequence.
+      for (size_t i = 1; i <= 5; ++i) {
+        mark_arg(i, BufferAccessKind::kConservative);
+      }
     } else if (op_name == "tl.tpu.reduce_sum" ||
                op_name == "tl.tpu.reduce_max") {
       // The current pool-based lowering initializes the physically padded

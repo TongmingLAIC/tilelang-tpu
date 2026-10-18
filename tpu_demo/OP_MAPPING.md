@@ -69,13 +69,25 @@ supported directly; no automatic down-conversion is required.
 | --- | --- | --- | --- | --- |
 | `ppl_exp` | Coefficient load plus `tpu_bdc_fp_exp` | Range reduction and polynomial composed from RV arithmetic/conversion instructions | FP16, BF16, FP32 | FP32 |
 | `ppl_rsqrt` | `tpu_bdc_fp_rsqrt` | `rvt_sfu_rsqrt` | FP16, BF16, FP32 | FP16, BF16, FP32 |
-| `ppl_reduce_sum` | Zero padding plus staged `tpu_bdc_fp_avg_pool2d` | Sequential column slices plus `rvt_fadd` | FP16, BF16, FP32 | E4M3, E5M2, FP16, BF16, FP32 |
-| `ppl_reduce_max` | Negative-maximum padding plus staged `tpu_bdc_fp_max_pool2d` | Sequential column slices plus `rvt_fmax` | E4M3, E5M2, FP16, BF16, FP32 | E4M3, E5M2, FP16, BF16, FP32 |
+| `ppl_reduce_sum` | Zero padding plus staged `tpu_bdc_fp_avg_pool2d` | FP32: one `rvt_pool_favg`; FP16/BF16: accumulate in 16 FP32 lanes, then pool once | FP16, BF16, FP32 | FP16, BF16, FP32 |
+| `ppl_reduce_max` | Negative-maximum padding plus staged `tpu_bdc_fp_max_pool2d` | `rvt_pool_fmax` | E4M3, E5M2, FP16, BF16, FP32 | E4M3, E5M2, FP16, BF16, FP32 |
 
 Both reductions currently accept rank-2 input and output and reduce only
-`dim=1`. RV FP8 sum uses same-format additions, so every accumulation step is
-rounded to the selected FP8 format. TPU-Kernel FP8 sum, FP8 exp, and FP8 rsqrt
-are rejected because direct CModel probes do not produce a valid result.
+`dim=1`. RV uses one `1 x width` pooling window for FP32. FP16/BF16 convert
+each 16-element input block to FP32, add it into sixteen FP32 lanes, and pool
+those lanes once before converting to the output dtype. This avoids precision
+loss from pooling a wide input in the storage dtype. The final conversion
+preserves NaN and infinity, including overflow to infinity. The RV ISA requires
+FP8 storage to use FP16, BF16, or FP32 computation descriptors for this
+instruction. The current SDK cannot execute that descriptor combination
+reliably: direct CModel probes either fail or produce invalid values, and the
+FP8-computation form produced zeros on hardware. FP8 sum is therefore rejected
+on both backends. The demo kernels already convert FP8 normalization
+intermediates to FP32 before reduction.
+FP8 exp and FP8 rsqrt are also rejected because direct CModel probes do not
+produce a valid result.
+Max reduction does not guarantee NaN propagation on either backend; results
+for rows containing NaNs are unspecified.
 
 ## Row lookup and sorting
 
