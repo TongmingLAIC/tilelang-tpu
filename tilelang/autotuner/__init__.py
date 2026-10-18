@@ -19,6 +19,15 @@ import torch
 import os
 import sys
 
+from tilelang.autotuner.candidate_runner import (
+    CandidateRecord as CandidateRecord,
+    CandidateRunner,
+    StagedAutotuneResult,
+    TimingResult as TimingResult,
+    ValidationResult as ValidationResult,
+    run_candidates,
+)
+
 # Configure logging for the autotuner module
 # TODO: Consider creating a common logger in utils
 logger = logging.getLogger(__name__)
@@ -332,6 +341,31 @@ class AutoTuner:
             libcode=best_jit_context.profiler.func.lib_code,
             func=self.fn(*best_config),
             kernel=best_jit_context.profiler.func)
+
+    def run_with_runner(
+        self,
+        runner: CandidateRunner,
+        warmup: int = 25,
+        rep: int = 100,
+        timeout: float = 100.0,
+    ) -> StagedAutotuneResult:
+        """Run the same configuration list with a backend-specific runner.
+
+        This path is intended for backends whose build, validation, timing, or
+        isolation requirements do not match the CUDA/HIP ``Profiler`` path.
+        The runner owns those backend details; the common layer only enumerates
+        configurations, retains every outcome, and selects the fastest valid
+        candidate.
+        """
+
+        return run_candidates(
+            self.fn,
+            self.configs,
+            runner,
+            warmup=warmup,
+            rep=rep,
+            timeout_s=timeout,
+        )
 
     def __call__(self) -> Any:
         """Make the AutoTuner callable, running the auto-tuning process.
