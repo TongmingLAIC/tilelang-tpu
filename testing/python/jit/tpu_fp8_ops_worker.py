@@ -46,12 +46,12 @@ def _profile_selection() -> Tuple[str, str, str]:
     runtime_mode = os.environ.get("TILELANG_TPU_PROFILE_RUNTIME_MODE", "")
     if programming_model not in ("tpukernel", "rv"):
         raise RuntimeError("FP8 capability worker requires programming_model=tpukernel or rv")
-    if chip not in ("bm1690", "sg2260e"):
+    if chip not in ("bm1690", "bm1690e"):
         raise RuntimeError("FP8 capability worker requires a supported TPU chip")
     if runtime_mode not in ("cmodel", "pcie"):
         raise RuntimeError("FP8 capability worker requires runtime_mode=cmodel or pcie")
-    if programming_model == "rv" and chip != "sg2260e":
-        raise RuntimeError("RV Tensor FP8 validation requires chip=sg2260e")
+    if programming_model == "rv" and chip != "bm1690e":
+        raise RuntimeError("RV Tensor FP8 validation requires chip=bm1690e")
     if os.environ.get("TILELANG_TPU_BENCHMARK_RUNS") != "0":
         raise RuntimeError("FP8 profiling requires exactly one kernel launch")
     if runtime_mode == "cmodel":
@@ -60,8 +60,8 @@ def _profile_selection() -> Tuple[str, str, str]:
             raise RuntimeError("CModel FP8 worker refuses PCIe recorder/device state: " +
                                ", ".join(inherited_gates))
     else:
-        if chip != "sg2260e":
-            raise RuntimeError("PCIe FP8 worker accepts only chip=sg2260e")
+        if chip != "bm1690e":
+            raise RuntimeError("PCIe FP8 worker accepts only chip=bm1690e")
         required = {
             "TILELANG_TPU_ALLOW_PCIE_LOAD": "1",
             "TILELANG_TPU_ALLOW_PCIE_PROFILE": "1",

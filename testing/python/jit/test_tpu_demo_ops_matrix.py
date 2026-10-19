@@ -18,7 +18,7 @@ def _execution_args(**overrides):
         "runtime_mode": "pcie",
         "output_dir": Path("matrix-output"),
         "timeout": 30.0,
-        "chip": "sg2260e",
+        "chip": "bm1690e",
         "programming_model": "tpukernel",
         "operations": ("matmul",),
         "dtypes": None,
@@ -54,7 +54,7 @@ def test_validate_args_accepts_explicit_scoped_pcie_request():
         }, "--allow-pcie and --allow-pcie-profile"),
         ({
             "chip": "bm1690"
-        }, "explicit --chip sg2260e"),
+        }, "explicit --chip bm1690e"),
         ({
             "device_id": 1
         }, "only --device-id 0"),
@@ -516,7 +516,7 @@ def test_preflight_board_health_rejects_malformed_or_timed_out_probe(monkeypatch
     assert not (tmp_path / "tilelang-tpu-device-0.session.json").exists()
 
 
-def _numeric_payload(case, *, chip="sg2260e", programming_model="tpukernel", runtime_mode="cmodel"):
+def _numeric_payload(case, *, chip="bm1690e", programming_model="tpukernel", runtime_mode="cmodel"):
     return {
         "status": "passed",
         "operation": case.operation,
@@ -550,7 +550,7 @@ def test_validate_numeric_identity_accepts_exact_variant_and_backend():
     case = case_by_id("flashattn.float16.weighted-keys")
     matrix.validate_numeric_identity(
         _numeric_payload(case),
-        chip="sg2260e",
+        chip="bm1690e",
         programming_model="tpukernel",
         runtime_mode="cmodel",
         case=case,
@@ -575,7 +575,7 @@ def test_validate_numeric_identity_rejects_wrong_case_or_backend(field, wrong_va
     with pytest.raises(RuntimeError, match=field):
         matrix.validate_numeric_identity(
             payload,
-            chip="sg2260e",
+            chip="bm1690e",
             programming_model="tpukernel",
             runtime_mode="cmodel",
             case=case,
@@ -604,7 +604,7 @@ def test_validate_numeric_identity_rejects_nonpassing_or_nonfinite_metrics(metri
     with pytest.raises(RuntimeError, match="metrics|finite"):
         matrix.validate_numeric_identity(
             payload,
-            chip="sg2260e",
+            chip="bm1690e",
             programming_model="tpukernel",
             runtime_mode="cmodel",
             case=case,
@@ -619,7 +619,7 @@ def test_validate_numeric_identity_rejects_missing_variant_identity():
     with pytest.raises(RuntimeError, match="scheduled variant"):
         matrix.validate_numeric_identity(
             payload,
-            chip="sg2260e",
+            chip="bm1690e",
             programming_model="tpukernel",
             runtime_mode="cmodel",
             case=case,
@@ -634,7 +634,7 @@ def test_validate_numeric_identity_rejects_wrong_kernel_variant():
     with pytest.raises(RuntimeError, match="kernel variant mismatch"):
         matrix.validate_numeric_identity(
             payload,
-            chip="sg2260e",
+            chip="bm1690e",
             programming_model="rv",
             runtime_mode="cmodel",
             case=case,
@@ -649,7 +649,7 @@ def test_validate_numeric_identity_rejects_missing_causal_identity():
     with pytest.raises(RuntimeError, match="causal mode"):
         matrix.validate_numeric_identity(
             payload,
-            chip="sg2260e",
+            chip="bm1690e",
             programming_model="tpukernel",
             runtime_mode="cmodel",
             case=case,
@@ -682,9 +682,9 @@ def _toolchain_identity(runtime_mode):
                     "sha256": "bm1690"
                 }
             },
-            "sg2260e": {
+            "bm1690e": {
                 "kernel_include_tree": {
-                    "sha256": "sg2260e"
+                    "sha256": "bm1690e"
                 }
             },
         },
@@ -763,7 +763,7 @@ def promotion(tmp_path, monkeypatch):
     monkeypatch.setattr(matrix, "git_source_identity", lambda _repo_root: dict(current))
 
     bm = _promotion_summary(case, "bm1690", "tpukernel")
-    sg = _promotion_summary(case, "sg2260e", "rv")
+    sg = _promotion_summary(case, "bm1690e", "rv")
     sg["started_at"] = "2026-09-08T00:02:00+00:00"
     sg["finished_at"] = "2026-09-08T00:03:00+00:00"
     bm_path = tmp_path / "bm.json"
@@ -779,7 +779,7 @@ def promotion(tmp_path, monkeypatch):
         sg_path=sg_path,
         case=case,
         current=current,
-        scheduled=(("sg2260e", "rv", case),),
+        scheduled=(("bm1690e", "rv", case),),
         toolchain=_toolchain_identity("pcie"),
         pcie_started_at="2026-09-08T00:04:00+00:00",
         repo_root=tmp_path,
@@ -802,7 +802,7 @@ def test_promotion_accepts_matching_clean_complete_evidence(promotion):
     assert evidence["git_commit"] == promotion.current["git_commit"]
     assert evidence["validated_case_count"] == 1
     assert len(evidence["bm1690_summary_sha256"]) == 64
-    assert len(evidence["sg2260e_summary_sha256"]) == 64
+    assert len(evidence["bm1690e_summary_sha256"]) == 64
 
 
 @pytest.mark.parametrize("location", ("current", "bm-summary"))
@@ -893,7 +893,7 @@ def test_promotion_rejects_same_file_for_both_chip_stages(promotion):
 
 def test_promotion_rejects_mixed_chip_stage(promotion):
     promotion.bm["target_scope"].append({
-        "chip": "sg2260e",
+        "chip": "bm1690e",
         "programming_model": "rv",
     })
     _write_json(promotion.bm_path, promotion.bm)
@@ -906,7 +906,7 @@ def test_promotion_requires_bm_stage_to_finish_before_sg_stage(promotion):
     promotion.bm["finished_at"] = "2026-09-08T00:04:00+00:00"
     _write_json(promotion.bm_path, promotion.bm)
 
-    with pytest.raises(RuntimeError, match="BM1690 must finish before SG2260E"):
+    with pytest.raises(RuntimeError, match="BM1690 must finish before BM1690E"):
         _validate_promotion(promotion)
 
 
@@ -916,7 +916,7 @@ def test_promotion_requires_bm_stage_to_finish_before_sg_stage(promotion):
         ("bm", "2026-09-08T00:02:00+00:00", "2026-09-08T00:01:00+00:00",
          "BM1690 starts after it finishes"),
         ("sg", "2026-09-08T00:03:00+00:00", "2026-09-08T00:02:00+00:00",
-         "SG2260E starts after it finishes"),
+         "BM1690E starts after it finishes"),
     ),
 )
 def test_promotion_rejects_reversed_stage_interval(promotion, stage, started_at, finished_at,
@@ -933,7 +933,7 @@ def test_promotion_rejects_reversed_stage_interval(promotion, stage, started_at,
 def test_promotion_requires_sg_stage_to_finish_before_pcie(promotion):
     promotion.pcie_started_at = "2026-09-08T00:02:30+00:00"
 
-    with pytest.raises(RuntimeError, match="SG2260E must finish before PCIe"):
+    with pytest.raises(RuntimeError, match="BM1690E must finish before PCIe"):
         _validate_promotion(promotion)
 
 
@@ -963,7 +963,7 @@ def test_promotion_rejects_inconsistent_summary_counts(promotion):
 
 
 def test_promotion_rejects_result_outside_declared_scope(promotion):
-    promotion.bm["results"].append(_promotion_result(promotion.case, "sg2260e", "rv"))
+    promotion.bm["results"].append(_promotion_result(promotion.case, "bm1690e", "rv"))
     _write_json(promotion.bm_path, promotion.bm)
 
     with pytest.raises(RuntimeError, match="result outside target_scope"):
@@ -1254,7 +1254,7 @@ def test_failed_board_postflight_is_not_retried(monkeypatch, tmp_path, interrupt
         matrix,
         "numeric_payload",
         lambda _path: _numeric_payload(
-            case, chip="sg2260e", programming_model="tpukernel", runtime_mode="pcie"),
+            case, chip="bm1690e", programming_model="tpukernel", runtime_mode="pcie"),
     )
 
     health_calls = []
@@ -1295,7 +1295,7 @@ def test_failed_board_postflight_is_not_retried(monkeypatch, tmp_path, interrupt
     monkeypatch.setattr(tilelang_jit, "TPUInstructionProfiler", FakeProfiler)
 
     def invoke_matrix():
-        return matrix.run_matrix(args, tmp_path, output, (("sg2260e", "tpukernel", case),), {
+        return matrix.run_matrix(args, tmp_path, output, (("bm1690e", "tpukernel", case),), {
             "PPL_PROJECT_ROOT": "/sdk",
             "TMPDIR": str(scratch)
         })
@@ -1324,7 +1324,7 @@ def test_failed_board_postflight_is_not_retried(monkeypatch, tmp_path, interrupt
     assert result["artifact_dir"] == str(report.output_dir)
     assert result["raw_instruction_count"] == 1
     assert result["numeric"] == _numeric_payload(
-        case, chip="sg2260e", programming_model="tpukernel", runtime_mode="pcie")
+        case, chip="bm1690e", programming_model="tpukernel", runtime_mode="pcie")
     if interrupted:
         assert "board_postflight_failure" not in result
     else:

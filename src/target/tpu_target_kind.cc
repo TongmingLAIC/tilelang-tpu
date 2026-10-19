@@ -31,7 +31,7 @@ void RegisterTPUTargetKindIfAbsent() {
         TargetKindRegEntry::ListTargetKindOptions(existing_target_kind.value());
     ICHECK(options.count("mcpu"))
         << "An existing TVM target kind named 'tpu' does not accept -mcpu; "
-        << "TileLang TPU requires -mcpu=<bm1690|sg2260e>. Rebuild against a "
+        << "TileLang TPU requires -mcpu=<bm1690|bm1690e>. Rebuild against a "
         << "compatible TVM target registration.";
     ICHECK_EQ(options["mcpu"], "runtime.String")
         << "An existing TVM target kind named 'tpu' has an incompatible "

@@ -169,7 +169,7 @@ def test_public_tpu_ops_document_backend_dtype_support_and_mapping():
 def test_fp32_matmul_uses_one_portable_frontend_and_native_backend_mapping(programming_model):
     source = tilelang.lower(
         build_matmul(dtype="float32", programming_model=programming_model),
-        target=f"tpu -mcpu=sg2260e -tpu-programming-model={programming_model}").kernel_source
+        target=f"tpu -mcpu=bm1690e -tpu-programming-model={programming_model}").kernel_source
     if programming_model == "rv":
         assert "rvt_fmm_nn" in source
         assert "rvt_fmm2" not in source
@@ -197,7 +197,7 @@ def test_backend_selection_rejects_unsupported_or_unsupervised_paths(monkeypatch
             device_id=None)
     with pytest.raises(ValueError, match="does not yet expose"):
         validate_selection(
-            chip="sg2260e",
+            chip="bm1690e",
             programming_model="rv",
             runtime_mode="cmodel",
             supports_rv=False,
@@ -206,7 +206,7 @@ def test_backend_selection_rejects_unsupported_or_unsupervised_paths(monkeypatch
     monkeypatch.delenv("TILELANG_TPU_PROFILE_SESSION", raising=False)
     with pytest.raises(ValueError, match="supervised demo matrix"):
         validate_selection(
-            chip="sg2260e",
+            chip="bm1690e",
             programming_model="tpukernel",
             runtime_mode="pcie",
             supports_rv=False,
@@ -214,7 +214,7 @@ def test_backend_selection_rejects_unsupported_or_unsupervised_paths(monkeypatch
             device_id=0)
 
 
-@pytest.mark.parametrize("chip,cores", (("bm1690", "8"), ("sg2260e", "4")))
+@pytest.mark.parametrize("chip,cores", (("bm1690", "8"), ("bm1690e", "4")))
 def test_cmodel_selection_sets_physical_core_topology(monkeypatch, chip, cores):
     monkeypatch.setenv("TILELANG_TPU_ALLOW_PCIE_LOAD", "1")
     validate_selection(

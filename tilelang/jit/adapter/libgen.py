@@ -174,7 +174,7 @@ class LibraryGenerator(object):
             assert self.tpu_target is not None and self.tpu_runtime is not None
             # The vendor CModel runtime is process-global. Reserve its core
             # topology before dlopen rather than allowing BM1690 (8 cores) and
-            # SG2260E (4 cores) to silently share one initialized runtime.
+            # BM1690E (4 cores) to silently share one initialized runtime.
             from .tpu import reserve_tpu_runtime_identity
             tpu_device_id = 0
             tpu_sdk_identity = self._tpu_runtime_sdk_identity(lib_path)
@@ -519,7 +519,7 @@ class LibraryGenerator(object):
         libkernel = os.path.join(src_dir, "libkernel.so")
         main_so = os.path.join(src_dir, "main.so")
         rpath = f"{layout.runtime_lib}:{layout.backend_lib}"
-        # TPUv7 defaults to eight emulator cores. SG2260E exposes four, and
+        # TPUv7 defaults to eight emulator cores. BM1690E exposes four, and
         # launching the extra scalar-emulator workers makes them address
         # non-existent cores before the first kernel can complete.  Embed the
         # value in main.so so the runtime process does not depend on an ambient

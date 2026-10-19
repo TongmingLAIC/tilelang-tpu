@@ -4,7 +4,7 @@
 
 The public selection is deliberately split into three independent axes:
 
-* chip: the physical TPU generation (``bm1690`` or ``sg2260e``);
+* chip: the physical TPU generation (``bm1690`` or ``bm1690e``);
 * programming model: the device ISA/API family (``tpukernel`` or ``rv``);
 * runtime mode: the host execution environment (``cmodel`` or ``pcie``).
 
@@ -36,7 +36,7 @@ class TPUChipSpec:
         return programming_model in self.programming_models
 
 
-# BM1690 and SG2260E share the TPUv7 local-memory geometry used by the current
+# BM1690 and BM1690E share the TPUv7 local-memory geometry used by the current
 # TileLang allocator/codegen. The different SDK architecture and physical core
 # count are represented here rather than inferred from a directory layout.
 TPU_CHIP_SPECS: Mapping[str, TPUChipSpec] = MappingProxyType({
@@ -48,11 +48,11 @@ TPU_CHIP_SPECS: Mapping[str, TPUChipSpec] = MappingProxyType({
             physical_core_count=8,
             programming_models=("tpukernel",),
         ),
-    "sg2260e":
+    "bm1690e":
         TPUChipSpec(
-            name="sg2260e",
+            name="bm1690e",
             ppl_arch="tpub_7_1_e",
-            ppl_compile_definitions=("__tpub_7_1_e__", "__sg2260e__"),
+            ppl_compile_definitions=("__tpub_7_1_e__", "__bm1690e__"),
             physical_core_count=4,
             programming_models=("tpukernel", "rv"),
         ),
@@ -100,7 +100,7 @@ def get_tpu_target_chip(target: Any) -> Optional[str]:
     mcpu_value = str(raw_mcpu).strip() if raw_mcpu is not None else ""
     if not mcpu_value or mcpu_value == "unknown":
         raise ValueError("TPU target requires an explicit physical chip: "
-                         "tpu -mcpu=<bm1690|sg2260e> "
+                         "tpu -mcpu=<bm1690|bm1690e> "
                          "-tpu-programming-model=<tpukernel|rv>")
     return get_tpu_chip_spec(mcpu_value).name
 

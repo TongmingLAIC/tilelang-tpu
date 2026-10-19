@@ -11,8 +11,8 @@ wrapper around the PPL programming framework.
 
 ## Highlights
 
-- Explicit chip and programming-model selection for BM1690 and SG2260E
-- TPU-Kernel support on both chips and RV Tensor support on SG2260E
+- Explicit chip and programming-model selection for BM1690 and BM1690E
+- TPU-Kernel support on both chips and RV Tensor support on BM1690E
 - A single PPL 1.7 toolchain layout for compilation, CModel, and PCIe execution
 - TPU-specific TileLang intrinsics for data movement, matrix multiplication,
   elementwise operations, reductions, and common neural-network operations
@@ -26,7 +26,7 @@ wrapper around the PPL programming framework.
 | Chip | Physical cores | Programming models | Runtime modes |
 | --- | ---: | --- | --- |
 | BM1690 | 8 | TPU-Kernel | CModel |
-| SG2260E | 4 | TPU-Kernel, RV Tensor | CModel, PCIe |
+| BM1690E | 4 | TPU-Kernel, RV Tensor | CModel, PCIe |
 
 The chip, programming model, and runtime mode are independent choices with
 different responsibilities:
@@ -37,8 +37,8 @@ different responsibilities:
 - `runtime_mode` selects simulation through CModel or execution on a PCIe
   device.
 
-The available target combinations are BM1690 with TPU-Kernel, SG2260E with
-TPU-Kernel, and SG2260E with RV Tensor. A bare `target="tpu"`, an incomplete
+The available target combinations are BM1690 with TPU-Kernel, BM1690E with
+TPU-Kernel, and BM1690E with RV Tensor. A bare `target="tpu"`, an incomplete
 target, or BM1690 with RV Tensor is rejected before code generation.
 
 ## Requirements
@@ -46,7 +46,7 @@ target, or BM1690 with RV Tensor is rejected before code generation.
 - Linux x86_64 and Python 3.8 or later
 - CMake 3.26 or later and a C++17 compiler
 - A complete SOPHGO PPL 1.7 SDK
-- A TPUv7 driver and runtime installation for SG2260E PCIe execution
+- A TPUv7 driver and runtime installation for BM1690E PCIe execution
 
 Only the PPL 1.7 `deps/` release layout is supported. Older PPL directory
 layouts and environment scripts are not part of this toolchain.
@@ -74,14 +74,14 @@ export TILELANG_TPU_SOURCE="$(pwd)"
 export PYTHONPATH="${TILELANG_TPU_SOURCE}${PYTHONPATH:+:${PYTHONPATH}}"
 ```
 
-Run an SG2260E RV Tensor kernel with CModel:
+Run a BM1690E RV Tensor kernel with CModel:
 
 ```bash
 python -m tilelang.jit.tpu_cmodel \
   --output-dir "$HOME/tmp/tilelang/quickstart-rv-$(date +%s%N)" -- \
   python -m tpu_demo.run \
   --case matmul.float16 \
-  --chip sg2260e \
+  --chip bm1690e \
   --programming-model rv \
   --runtime-mode cmodel
 ```
@@ -109,7 +109,7 @@ import tilelang
 kernel = tilelang.compile(
     program,
     out_idx=-1,
-    target="tpu -mcpu=sg2260e -tpu-programming-model=tpukernel",
+    target="tpu -mcpu=bm1690e -tpu-programming-model=tpukernel",
     runtime_mode="cmodel",
 )
 ```
@@ -121,7 +121,7 @@ kernel has an RV mapping:
 kernel = tilelang.compile(
     program,
     out_idx=-1,
-    target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
+    target="tpu -mcpu=bm1690e -tpu-programming-model=rv",
     runtime_mode="cmodel",
 )
 ```
@@ -164,7 +164,7 @@ TPU-Kernel or RV Tensor according to the selected target:
 Both programming models provide scalar arithmetic, `exp`, `rsqrt`, sum/max
 reductions, and portable embedding lookup, subject to the documented dtype
 matrix. TPU-Kernel additionally exposes backend-specific gather and BM1690
-top-k operations. The `T.rvt_*` namespace is a low-level SG2260E interface for
+top-k operations. The `T.rvt_*` namespace is a low-level BM1690E interface for
 kernels that manage RV Tensor descriptors directly; it must not be mixed with
 high-level `T.ppl_*` semantics inside one kernel. See the
 [`tpu_demo` guide](./tpu_demo/README.md) for examples and the

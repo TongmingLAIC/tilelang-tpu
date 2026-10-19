@@ -31,7 +31,7 @@ def main():
         try:
             artifact = tilelang.lower(
                 topk_probe(),
-                target=f"tpu -mcpu=sg2260e -tpu-programming-model={model}",
+                target=f"tpu -mcpu=bm1690e -tpu-programming-model={model}",
                 runtime_mode="cmodel")
             (args.output / f"moe-topk-{model}.c").write_text(artifact.kernel_source)
             records.append(

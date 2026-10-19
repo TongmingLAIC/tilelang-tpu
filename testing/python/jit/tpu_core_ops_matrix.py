@@ -93,8 +93,8 @@ _CASES = ("elementwise-add", "elementwise-sub", "elementwise-mul", "elementwise-
 _MATRIX_KIND = "tpu_core_ops"
 _SCHEMA_VERSION = 1
 _WORKER_RESULT_PREFIX = "TPU_CORE_NUMERIC_RESULT="
-_CMODEL_CONFIGS = (("sg2260e", "tpukernel"), ("sg2260e", "rv"), ("bm1690", "tpukernel"))
-_PCIE_CONFIGS = (("sg2260e", "tpukernel"), ("sg2260e", "rv"))
+_CMODEL_CONFIGS = (("bm1690e", "tpukernel"), ("bm1690e", "rv"), ("bm1690", "tpukernel"))
+_PCIE_CONFIGS = (("bm1690e", "tpukernel"), ("bm1690e", "rv"))
 
 
 def _worker_environment(repo_root: Path, runtime_mode: str,
@@ -111,7 +111,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--runtime-mode", choices=("cmodel", "pcie"), required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=120.0)
-    parser.add_argument("--chip", choices=("sg2260e", "bm1690"))
+    parser.add_argument("--chip", choices=("bm1690e", "bm1690"))
     parser.add_argument("--programming-model", choices=("tpukernel", "rv"))
     parser.add_argument("--case", choices=_CASES, action="append", dest="cases")
     parser.add_argument("--device-id", type=int)
@@ -158,8 +158,8 @@ def _validate_args(args: argparse.Namespace) -> None:
             raise RuntimeError("PCIe requires a non-negative 32-bit --device-id")
         if args.device_id != 0:
             raise RuntimeError("this single-card validation host accepts only --device-id 0")
-        if args.chip != "sg2260e":
-            raise RuntimeError("this machine requires explicit --chip sg2260e for PCIe cases")
+        if args.chip != "bm1690e":
+            raise RuntimeError("this machine requires explicit --chip bm1690e for PCIe cases")
         if not args.cases and not args.all_pcie_cases:
             raise RuntimeError("PCIe requires an explicit --case or --all-pcie-cases")
         if args.bm_cmodel_summary is None or args.sg_cmodel_summary is None:
@@ -219,7 +219,7 @@ def _validate_pcie_promotion(
     current_toolchain: Mapping[str, Any],
     pcie_started_at: str,
 ) -> dict[str, Any]:
-    """Require matching BM1690 and SG2260E CModel evidence for every launch."""
+    """Require matching BM1690 and BM1690E CModel evidence for every launch."""
 
     assert args.bm_cmodel_summary is not None and args.sg_cmodel_summary is not None
     if (current_toolchain.get("runtime_mode") != "pcie" or
@@ -242,10 +242,10 @@ def _validate_pcie_promotion(
         matrix_kind=_MATRIX_KIND,
         schema_version=_SCHEMA_VERSION,
         bm_allowed_scope=(("bm1690", "tpukernel"),),
-        sg_allowed_scope=(("sg2260e", "tpukernel"), ("sg2260e", "rv")),
+        sg_allowed_scope=(("bm1690e", "tpukernel"), ("bm1690e", "rv")),
         pcie_started_at=pcie_started_at,
     )
-    for label, payload in (("BM1690", bm), ("SG2260E", sg)):
+    for label, payload in (("BM1690", bm), ("BM1690E", sg)):
         if payload.get("git_commit") != commit:
             raise RuntimeError(f"{label} core-op summary commit does not match current source")
         if payload.get("source_state_sha256") != source_digest:
@@ -274,7 +274,7 @@ def _validate_pcie_promotion(
         for case in cases:
             required = (
                 (f"bm1690/tpukernel/{case}", bm_results),
-                (f"sg2260e/{programming_model}/{case}", sg_results),
+                (f"bm1690e/{programming_model}/{case}", sg_results),
             )
             for key, results in required:
                 result = results.get(key)
@@ -303,8 +303,8 @@ def _validate_pcie_promotion(
         "source_state_sha256": source_digest,
         "bm1690_summary": bm["_resolved_path"],
         "bm1690_summary_sha256": bm["_sha256"],
-        "sg2260e_summary": sg["_resolved_path"],
-        "sg2260e_summary_sha256": sg["_sha256"],
+        "bm1690e_summary": sg["_resolved_path"],
+        "bm1690e_summary_sha256": sg["_sha256"],
         "validated_case_count": len(configurations) * len(cases),
     }
 

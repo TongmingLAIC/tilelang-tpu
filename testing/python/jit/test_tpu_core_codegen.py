@@ -152,10 +152,10 @@ def _lower_core_ops(chip, programming_model):
 
 
 @pytest.fixture(scope="module")
-def sg2260e_sources():
+def bm1690e_sources():
     return {
-        "tpukernel": _lower_core_ops("sg2260e", "tpukernel"),
-        "rv": _lower_core_ops("sg2260e", "rv"),
+        "tpukernel": _lower_core_ops("bm1690e", "tpukernel"),
+        "rv": _lower_core_ops("bm1690e", "rv"),
     }
 
 
@@ -179,10 +179,10 @@ def test_public_ppl_helpers_form_one_backend_neutral_tir_contract():
     }
 
 
-def test_sg2260e_tpukernel_selects_only_tpukernel_instructions(sg2260e_sources):
-    source = sg2260e_sources["tpukernel"]
+def test_bm1690e_tpukernel_selects_only_tpukernel_instructions(bm1690e_sources):
+    source = bm1690e_sources["tpukernel"]
 
-    assert "TileLang TPU target: sg2260e, programming model: tpukernel" in source
+    assert "TileLang TPU target: bm1690e, programming model: tpukernel" in source
     assert "TPU-Kernel externs require -tpu-programming-model=tpukernel" in source
     assert "tpu_initialize()" in source
     assert "tpu_poll()" in source
@@ -196,10 +196,10 @@ def test_sg2260e_tpukernel_selects_only_tpukernel_instructions(sg2260e_sources):
     assert "rvt_fmm" not in source
 
 
-def test_sg2260e_rv_selects_only_rv_tensor_instructions(sg2260e_sources):
-    source = sg2260e_sources["rv"]
+def test_bm1690e_rv_selects_only_rv_tensor_instructions(bm1690e_sources):
+    source = bm1690e_sources["rv"]
 
-    assert "TileLang TPU target: sg2260e, programming model: rv" in source
+    assert "TileLang TPU target: bm1690e, programming model: rv" in source
     assert "RVT externs require -tpu-programming-model=rv" in source
     assert '#include "atomic_def.h"' in source
     assert '#include "rvt_api.h"' in source
@@ -229,9 +229,9 @@ def test_sg2260e_rv_selects_only_rv_tensor_instructions(sg2260e_sources):
     assert "tpu_bdc_fp_" not in source
 
 
-def test_same_frontend_reaches_distinct_sg2260e_instruction_selectors(sg2260e_sources):
-    tpukernel = sg2260e_sources["tpukernel"]
-    rv = sg2260e_sources["rv"]
+def test_same_frontend_reaches_distinct_bm1690e_instruction_selectors(bm1690e_sources):
+    tpukernel = bm1690e_sources["tpukernel"]
+    rv = bm1690e_sources["rv"]
 
     assert tpukernel != rv
     assert "tpu_bdc_fp_mm(" in tpukernel and "rvt_fmm2a_nn(" not in tpukernel
@@ -259,10 +259,10 @@ def test_topk_capability_is_chip_specific_and_fails_before_runtime():
     ).kernel_source
     assert "tpu_hau_sort_natural_index(" in bm1690_source
 
-    with pytest.raises(ValueError, match="unavailable on SG2260E"):
+    with pytest.raises(ValueError, match="unavailable on BM1690E"):
         tilelang.lower(
             _tpukernel_topk,
-            target=_tpu_target("sg2260e", "tpukernel"),
+            target=_tpu_target("bm1690e", "tpukernel"),
             runtime_mode="cmodel",
         )
 
@@ -271,7 +271,7 @@ def test_portable_ops_and_raw_rv_abi_cannot_share_a_kernel():
     with pytest.raises(tvm.error.TVMError, match="cannot share a kernel with raw.*rvt"):
         tilelang.lower(
             _portable_and_raw_rv,
-            target=_tpu_target("sg2260e", "rv"),
+            target=_tpu_target("bm1690e", "rv"),
             runtime_mode="cmodel",
         )
 
@@ -281,7 +281,7 @@ def test_reserved_runtime_entry_name_is_rejected():
     with pytest.raises(tvm.error.TVMError, match="conflicts with a generated runtime entry"):
         tilelang.lower(
             reserved,
-            target=_tpu_target("sg2260e", "tpukernel"),
+            target=_tpu_target("bm1690e", "tpukernel"),
             runtime_mode="cmodel",
         )
 
@@ -289,12 +289,12 @@ def test_reserved_runtime_entry_name_is_rejected():
 def test_global_to_global_copy_uses_system_memory_instruction():
     tpukernel = tilelang.lower(
         _global_to_global_copy,
-        target=_tpu_target("sg2260e", "tpukernel"),
+        target=_tpu_target("bm1690e", "tpukernel"),
         runtime_mode="cmodel",
     ).kernel_source
     rv = tilelang.lower(
         _global_to_global_copy,
-        target=_tpu_target("sg2260e", "rv"),
+        target=_tpu_target("bm1690e", "rv"),
         runtime_mode="cmodel",
     ).kernel_source
 
@@ -308,7 +308,7 @@ def test_global_to_global_copy_uses_system_memory_instruction():
 @pytest.mark.parametrize("transfer", ("local", "global"))
 @pytest.mark.parametrize(
     "chip,programming_model",
-    (("sg2260e", "tpukernel"), ("sg2260e", "rv"), ("bm1690", "tpukernel")),
+    (("bm1690e", "tpukernel"), ("bm1690e", "rv"), ("bm1690", "tpukernel")),
 )
 def test_portable_copy_cases_select_the_expected_instruction_path(dtype, transfer, chip,
                                                                   programming_model):
@@ -368,8 +368,8 @@ def test_portable_copy_cases_select_the_expected_instruction_path(dtype, transfe
 
 @pytest.mark.parametrize(
     ("chip", "programming_model", "instruction"),
-    (("bm1690", "tpukernel", "tpu_bdc_cast("), ("sg2260e", "tpukernel", "tpu_bdc_cast("),
-     ("sg2260e", "rv", "rvt_cvt_f2f(9, 8)")),
+    (("bm1690", "tpukernel", "tpu_bdc_cast("), ("bm1690e", "tpukernel", "tpu_bdc_cast("),
+     ("bm1690e", "rv", "rvt_cvt_f2f(9, 8)")),
 )
 def test_fp16_to_bf16_copy_conversion_selects_validated_backend(chip, programming_model,
                                                                 instruction):
@@ -389,7 +389,7 @@ def test_integer_copy_conversion_capabilities_fail_closed(programming_model):
     with pytest.raises(tvm.error.TVMError, match=diagnostic):
         tilelang.lower(
             _local_integer_convert,
-            target=_tpu_target("sg2260e", programming_model),
+            target=_tpu_target("bm1690e", programming_model),
             runtime_mode="cmodel",
         )
 
@@ -410,12 +410,12 @@ def test_portable_elementwise_rejects_non_matrix_local_layout_at_frontend():
 def test_overwrite_gemm_accepts_input_dtype_and_selects_non_accumulating_form():
     tpukernel = tilelang.lower(
         _overwrite_fp16_gemm,
-        target=_tpu_target("sg2260e", "tpukernel"),
+        target=_tpu_target("bm1690e", "tpukernel"),
         runtime_mode="cmodel",
     ).kernel_source
     rv = tilelang.lower(
         _overwrite_fp16_gemm,
-        target=_tpu_target("sg2260e", "rv"),
+        target=_tpu_target("bm1690e", "rv"),
         runtime_mode="cmodel",
     ).kernel_source
 
@@ -427,7 +427,7 @@ def test_overwrite_gemm_accepts_input_dtype_and_selects_non_accumulating_form():
 
 @pytest.mark.parametrize("programming_model", ("tpukernel", "rv"))
 @pytest.mark.parametrize("profiling", (False, True))
-def test_sg2260e_pcie_core_ops_compile_and_link_without_loading(programming_model, profiling,
+def test_bm1690e_pcie_core_ops_compile_and_link_without_loading(programming_model, profiling,
                                                                 monkeypatch):
     """Validate the board artifact boundary without dlopen or dispatch."""
     if not os.environ.get("PPL_PROJECT_ROOT"):
@@ -438,13 +438,13 @@ def test_sg2260e_pcie_core_ops_compile_and_link_without_loading(programming_mode
     monkeypatch.delenv("TILELANG_TPU_PROFILE_RUNTIME_MODE", raising=False)
     if profiling:
         monkeypatch.setenv("TILELANG_TPU_PROFILE_SESSION", "1")
-        monkeypatch.setenv("TILELANG_TPU_PROFILE_CHIP", "sg2260e")
+        monkeypatch.setenv("TILELANG_TPU_PROFILE_CHIP", "bm1690e")
         monkeypatch.setenv("TILELANG_TPU_PROFILE_PROGRAMMING_MODEL", programming_model)
         monkeypatch.setenv("TILELANG_TPU_PROFILE_RUNTIME_MODE", "pcie")
 
-    target_spec = TPUTargetSpec("sg2260e", programming_model)
+    target_spec = TPUTargetSpec("bm1690e", programming_model)
     runtime_config = TPURuntimeConfig("pcie")
-    target = tvm.target.Target(_tpu_target("sg2260e", programming_model))
+    target = tvm.target.Target(_tpu_target("bm1690e", programming_model))
     artifact = tilelang.lower(
         _portable_core_ops,
         target=target,

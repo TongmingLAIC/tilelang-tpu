@@ -59,7 +59,7 @@ def _profile_selection():
     chip = os.environ.get("TILELANG_TPU_PROFILE_CHIP")
     programming_model = os.environ.get("TILELANG_TPU_PROFILE_PROGRAMMING_MODEL")
     runtime_mode = os.environ.get("TILELANG_TPU_PROFILE_RUNTIME_MODE")
-    if chip not in ("bm1690", "sg2260e"):
+    if chip not in ("bm1690", "bm1690e"):
         raise RuntimeError("missing or invalid TileLang TPU chip selection.")
     if programming_model not in ("tpukernel", "rv"):
         raise RuntimeError("missing or invalid TileLang TPU programming-model selection.")
@@ -76,8 +76,8 @@ def _profile_selection():
                 raise RuntimeError(
                     f"CModel profile worker inherited forbidden PCIe setting {name}.")
     else:
-        if chip != "sg2260e":
-            raise RuntimeError("PCIe core-op worker accepts only chip=sg2260e.")
+        if chip != "bm1690e":
+            raise RuntimeError("PCIe core-op worker accepts only chip=bm1690e.")
         for name in ("TILELANG_TPU_ALLOW_PCIE_LOAD", "TILELANG_TPU_ALLOW_PCIE_PROFILE",
                      "BMLIB_ENABLE_ALL_PROFILE"):
             if os.environ.get(name) != "1":

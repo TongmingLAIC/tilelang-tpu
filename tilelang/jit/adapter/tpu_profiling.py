@@ -1046,21 +1046,30 @@ def _find_perfai_root(config: TPUProfilingConfig, environment: Mapping[str, str]
     return None
 
 
-def _perfai_chip_name(config: TPUProfilingConfig) -> str:
-    """Return the PPL chip spelling expected by PerfAI's ``-e`` flag.
+def _perfai_chip_name(config: TPUProfilingConfig, environment: Mapping[str, str]) -> str:
+    """Resolve PerfAI's decoder name from the SDK's architecture mapping.
 
-    PPL invokes ``get_chip_name(chip_arch)`` before calling AutoRunner.  Its
-    mapping distinguishes the RV profile decoder as ``sg2260erv`` even though
-    TileLang deliberately exposes the physical chip as ``sg2260e`` plus a
-    separate programming-model axis.  Keep that vendor-only spelling at this
-    adapter boundary; it is not a third TileLang chip target.
+    PPL invokes ``get_chip_name(chip_arch)`` before calling AutoRunner. Keep
+    that lookup at the SDK boundary so vendor aliases never become physical
+    TileLang chip targets. Generic parser workers without an SDK use the
+    canonical name, optionally followed by the RV decoder suffix.
     """
 
-    if config.programming_model == "rv":
-        return "sg2260erv"
     # This preserves PPL's CModel special case in ppl_compile.py: BM1690's
     # PerfAI target is named sg2260.
-    return "sg2260" if config.chip == "bm1690" else config.chip
+    if config.chip == "bm1690":
+        return "sg2260"
+    if environment.get("PPL_PROJECT_ROOT"):
+        chip_map_path = Path(environment["PPL_PROJECT_ROOT"]) / "deps/chip/chip_map.json"
+        chip_map = json.loads(chip_map_path.read_text(encoding="utf-8"))
+        arch = config.target_spec.chip_spec.ppl_arch
+        if config.programming_model == "rv":
+            arch += "_rv"
+        for name, value in chip_map.items():
+            if value == arch:
+                return name
+        raise TPUProfilingError(f"PPL decoder architecture {arch!r} is missing from {chip_map_path}")
+    return config.chip + ("rv" if config.programming_model == "rv" else "")
 
 
 def _pcie_profile_arch(config: TPUProfilingConfig) -> str:
@@ -1864,7 +1873,7 @@ class TPUInstructionProfiler:
         # Profiling is exactly one launch.  The generated TileLang host
         # template otherwise honors an inherited benchmark loop.
         worker_env["TILELANG_TPU_BENCHMARK_RUNS"] = "0"
-        # PPL's CModel driver sets this for SG2260E.  Make the topology
+        # PPL's CModel driver sets this for BM1690E.  Make the topology
         # explicit for both supported chips so a worker does not inherit a
         # previous process's emulator-core setting.
         worker_env["TPU_RT_CORE_NUM"] = str(self.config.target_spec.chip_spec.physical_core_count)
@@ -1980,7 +1989,7 @@ class TPUInstructionProfiler:
                                         "bash",
                                         str(runner), "-d",
                                         str(output_dir), "-e",
-                                        _perfai_chip_name(self.config)
+                                        _perfai_chip_name(self.config, parser_env)
                                     ],
                                     cwd=perfai_root,
                                     environment=parser_env,

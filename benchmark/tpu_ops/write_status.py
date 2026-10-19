@@ -270,7 +270,7 @@ def write_status(output, document):
         (detail_dir / f'{op}.md').write_text('\n'.join(detail))
     lines.append('| moe | 未上板 | — | 未上板 | — | [能力诊断图](operators/moe.md) |')
     (detail_dir / 'moe.md').write_text(
-        '# MoE\n\n当前 SG2260E target 在 demo 依赖的 TopK lowering 中拒绝 '
+        '# MoE\n\n当前 BM1690E target 在 demo 依赖的 TopK lowering 中拒绝 '
         '`tpu_hau_sort_natural_index`。RV/TPUKernel 均在编译探针阶段跳过，没有完整算子板卡耗时。'
         '这不表示所有 expert GEMM 都不支持。\n\n'
         '![MoE 能力诊断](../figures/moe.png)\n\n'

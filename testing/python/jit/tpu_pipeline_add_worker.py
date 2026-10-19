@@ -13,7 +13,7 @@ from pathlib import Path
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--chip", choices=("bm1690", "sg2260e"), required=True)
+    parser.add_argument("--chip", choices=("bm1690", "bm1690e"), required=True)
     parser.add_argument("--tiles", type=int, required=True)
     parser.add_argument("--tile-width", type=int, required=True)
     parser.add_argument("--pipelined", action="store_true")
@@ -23,7 +23,7 @@ def main() -> int:
     args = parser.parse_args()
     if os.environ.get("TILELANG_CMODEL_PRIVATE_TMP") != "1":
         raise RuntimeError("pipeline CModel worker requires private IPC isolation")
-    os.environ["TPU_RT_CORE_NUM"] = "4" if args.chip == "sg2260e" else "8"
+    os.environ["TPU_RT_CORE_NUM"] = "4" if args.chip == "bm1690e" else "8"
     os.environ["TILELANG_TPU_BENCHMARK_RUNS"] = "0"
 
     import torch

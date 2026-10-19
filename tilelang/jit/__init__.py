@@ -67,7 +67,7 @@ def jit(
         The compilation target for TVM. If set to "auto", an appropriate target
         will be inferred automatically. Otherwise, must be one of the supported
         strings in AVAILABLE_TARGETS, a TPU target such as
-        ``"tpu -mcpu=sg2260e -tpu-programming-model=rv"``, or a
+        ``"tpu -mcpu=bm1690e -tpu-programming-model=rv"``, or a
         TVM Target instance.
     runtime_mode : Literal["pcie", "cmodel"], optional
         TPU execution environment. Leave unset for non-TPU targets.

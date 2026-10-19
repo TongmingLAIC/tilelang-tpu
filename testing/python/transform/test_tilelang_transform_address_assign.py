@@ -83,7 +83,7 @@ def _pressure_module(sizes, access_groups, symbol="main", access_repetitions=Non
             buffer.data, buffer.dtype, list(buffer.shape), tvm.tir.IntImm("bool", 1),
             tvm.tir.DeclBuffer(buffer, body))
     function = tvm.tir.PrimFunc([], body).with_attr("global_symbol", symbol)
-    target = tvm.target.Target("tpu -mcpu=sg2260e -tpu-programming-model=rv")
+    target = tvm.target.Target("tpu -mcpu=bm1690e -tpu-programming-model=rv")
     return tvm.tir.transform.BindTarget(target)(tvm.IRModule({symbol: function})), sizes
 
 
@@ -147,7 +147,7 @@ def test_parallel_command_group_extends_sequential_tir_uses_to_concurrent_lives(
             body = tvm.tir.Allocate(
                 buffer.data, buffer.dtype, list(buffer.shape),
                 tvm.tir.IntImm("bool", 1), tvm.tir.DeclBuffer(buffer, body))
-        target = tvm.target.Target("tpu -mcpu=sg2260e -tpu-programming-model=tpukernel")
+        target = tvm.target.Target("tpu -mcpu=bm1690e -tpu-programming-model=tpukernel")
         function = tvm.tir.PrimFunc([], body).with_attr("global_symbol", "main")
         return tvm.tir.transform.BindTarget(target)(tvm.IRModule({"main": function}))
 
@@ -233,7 +233,7 @@ def test_rv_scatter_separates_local_source_and_index_reads():
             index = T.alloc_shared((64, 1), "uint32")
             T.ppl_scatter(cache, source, index)
 
-    attrs = _assigned_attrs(main, target_spec="tpu -mcpu=sg2260e -tpu-programming-model=rv")
+    attrs = _assigned_attrs(main, target_spec="tpu -mcpu=bm1690e -tpu-programming-model=rv")
     assert _addr(attrs, "source") // BANK_SIZE != _addr(attrs, "index") // BANK_SIZE
 
 
@@ -312,7 +312,7 @@ def test_address_assignment_rejects_non_tpu_target():
 @pytest.mark.parametrize("target_spec, message, native_message", [
     ("tpu", "explicit physical chip", "supported target chip"),
     (
-        "tpu -mcpu=sg2260e",
+        "tpu -mcpu=bm1690e",
         "explicit programming model",
         "requires a normalized target",
     ),
@@ -618,8 +618,8 @@ def _liveness_attrs(body, target_spec):
 
 TPU_ADDRESS_TARGETS = [
     "tpu -mcpu=bm1690 -tpu-programming-model=tpukernel",
-    "tpu -mcpu=sg2260e -tpu-programming-model=tpukernel",
-    "tpu -mcpu=sg2260e -tpu-programming-model=rv",
+    "tpu -mcpu=bm1690e -tpu-programming-model=tpukernel",
+    "tpu -mcpu=bm1690e -tpu-programming-model=rv",
 ]
 
 

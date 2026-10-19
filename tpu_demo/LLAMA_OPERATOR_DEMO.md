@@ -1,14 +1,14 @@
 # GPTQ / W4A16（算子三）RV 迁移问题
 
-> 芯片：**SG2260E**（BM1690 同族）
-> 分支：`feature/sg2260e-rv-support`
+> 芯片：**BM1690E**（BM1690 同族）
+> 分支：`spike/agent-address-pipeline`
 > SDK：PPL v1.7.122
 
 ---
 
 ## 一、问题
 
-**GPTQ / W4A16 算子在 SG2260E 的 RV 通路上跑不起来。**
+**GPTQ / W4A16 算子在 BM1690E 的 RV 通路上跑不起来。**
 
 根因：这颗芯片上负责"4-bit 权重分组反量化"的原语（`tiu::dq2` → `rvt_dq2` / `tpu_bdc_f16_group_dequant`）**在两个后端上都没有可用实现**。
 
@@ -26,7 +26,7 @@
 TPUKERNEL_ASSERT( 0 && "Chip have no instruction like DQ2Op!!!\n");
 ```
 
-`--chip=sg2260e`（tpukernel）与 `--chip=sg2260erv --rv` **两者都断言**。
+`--chip=bm1690e`（tpukernel）与 `--chip=tpub_7_1_e --rv` **两者都断言**。
 
 ### ② 固件里有符号，但手工发射会把卡挂死
 
@@ -61,7 +61,7 @@ TPUKERNEL_ASSERT( 0 && "Chip have no instruction like DQ2Op!!!\n");
 
 ### ⑤ 厂商自己的 RV 编译器从不发射任何 `rvt_dq*`
 
-统计厂商**自己**为 sg2260erv 生成的 C 代码（`paged_attention_multicore.c`）中的指令出现次数：
+统计厂商**自己**为 BM1690E 的 RV 通路生成的 C 代码（`paged_attention_multicore.c`）中的指令出现次数：
 
 | 指令 | 次数 |
 |---|---|
@@ -79,7 +79,7 @@ TPUKERNEL_ASSERT( 0 && "Chip have no instruction like DQ2Op!!!\n");
 
 排查替代方案时发现，手册 `ppl::tiu::cast` 的转型表在真机上不成立。手册把 INT8/UINT8 作**源**的两行标为空，且没有 INT4/UINT4 的行或列。
 
-**真机实测**（SG2260E，PPL harness，PCIe），设备输出 vs 参考模型：
+**真机实测**（BM1690E，PPL harness，PCIe），设备输出 vs 参考模型：
 
 | 用例 | 手册预期 | 真机结果 |
 |---|---|---|
@@ -117,7 +117,7 @@ TPUKERNEL_ASSERT( 0 && "Chip have no instruction like DQ2Op!!!\n");
 
 | # | 事项 |
 |---|---|
-| 1 | **SG2260E 的 RV 通路上能否补齐 4-bit 分组反量化。** 若不能，请明确 4-bit 量化权重在这颗芯片上的推荐做法 |
+| 1 | **BM1690E 的 RV 通路上能否补齐 4-bit 分组反量化。** 若不能，请明确 4-bit 量化权重在这颗芯片上的推荐做法 |
 | 2 | **4-bit 拆包能否用现有基础指令组合实现。** 若能，我们可以自己拼出反量化，不必依赖 `rvt_dq2` |
 | 3 | **修正手册 4.6 数据类型转换表的错误**（`int8 → fp16` 实际可用） |
 | 4 | **排查 8 位整数作全局缓冲区导致挂卡的问题** |
@@ -141,7 +141,7 @@ TPUKERNEL_ASSERT( 0 && "Chip have no instruction like DQ2Op!!!\n");
 ```bash
 # 矩阵 runner（带看门狗、首次失败即停）
 python testing/python/jit/tpu_demo_ops_matrix.py \
-    --runtime-mode pcie --chip sg2260e --programming-model rv \
+    --runtime-mode pcie --chip bm1690e --programming-model rv \
     --case gptq-w4a16.float16 --device-id 0 --allow-pcie --allow-pcie-profile \
     --output-dir /tmp/matrix
 ```
@@ -152,7 +152,7 @@ python testing/python/jit/tpu_demo_ops_matrix.py \
 {
   "status": "passed",
   "operation": "gptq-w4a16", "dtype": "float16",
-  "chip": "sg2260e", "programming_model": "rv",
+  "chip": "bm1690e", "programming_model": "rv",
   "metrics": {"passed": true, "atol": 0.01, "rtol": 0.01,
               "max_abs_error": 0.0009765625,
               "mismatched_elements": 0, "element_count": 2048}
@@ -207,7 +207,7 @@ python testing/python/jit/tpu_demo_ops_matrix.py \
 
 ## 八、其余三个算子的验收
 
-其余三个算子（RMSNorm / Llama MLP / Paged Attention）**当前均已在 SG2260E 上通过**，判据与命令和算子三完全相同 —— **只需换 `--case`**。
+其余三个算子（RMSNorm / Llama MLP / Paged Attention）**当前均已在 BM1690E 上通过**，判据与命令和算子三完全相同 —— **只需换 `--case`**。
 
 | 算子 | 用例 | 实现（仓库位置） |
 |---|---|---|
@@ -217,12 +217,12 @@ python testing/python/jit/tpu_demo_ops_matrix.py \
 
 ```bash
 python testing/python/jit/tpu_demo_ops_matrix.py \
-    --runtime-mode pcie --chip sg2260e --programming-model rv \
+    --runtime-mode pcie --chip bm1690e --programming-model rv \
     --case llama-mlp.float16 --device-id 0 --allow-pcie --allow-pcie-profile \
     --output-dir /tmp/matrix
 ```
 
-**已实测结果**（SG2260E，PCIe）：
+**已实测结果**（BM1690E，PCIe）：
 
 | 用例 | status | 不匹配 | 最大误差 | 容差 |
 |---|---|---|---|---|

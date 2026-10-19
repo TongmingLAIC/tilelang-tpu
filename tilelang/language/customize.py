@@ -707,12 +707,12 @@ def ppl_topk(dst_data, dst_idx, src, K, descended, length):
     entries in each row are written. The local path stages each row through
     L2 SRAM and completes its DMA/HAU work before returning.
     This TPU-Kernel-only operation is supported on BM1690 and is rejected for
-    SG2260E by target-specific codegen.
+    BM1690E by target-specific codegen.
 
     Dtype support:
         - Global vectors on BM1690: FP32, INT32, or UINT32 values; INT32 indices.
         - Local row-wise tiles on BM1690: FP32 values; INT32 or UINT32 indices.
-        - TPU-Kernel on SG2260E: unavailable in the current SDK.
+        - TPU-Kernel on BM1690E: unavailable in the current SDK.
         - RV Tensor: unavailable.
     """
     operands = (("dst_data", dst_data), ("dst_idx", dst_idx), ("src", src))
@@ -782,7 +782,7 @@ def ppl_rsqrt(out, inp):
 
     Notes:
         PPL 1.7 exposes the same generic reciprocal-square-root instruction
-        for FP16, BF16, and FP32 on both BM1690 and SG2260E.
+        for FP16, BF16, and FP32 on both BM1690 and BM1690E.
 
     Dtype support:
         - TPU-Kernel: FP16, BF16, and FP32.

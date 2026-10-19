@@ -324,7 +324,7 @@ def capture_tpu_toolchain_identity(
     runtime_mode: str,
     *,
     environment: Optional[Mapping[str, str]] = None,
-    chips: Sequence[str] = ("bm1690", "sg2260e"),
+    chips: Sequence[str] = ("bm1690", "bm1690e"),
     tilelang_library: Optional[PathLike] = None,
     tvm_library: Optional[PathLike] = None,
     host_c_compiler: PathLike = "/usr/bin/cc",
@@ -414,6 +414,7 @@ def capture_tpu_toolchain_identity(
 
     watched_files = [
         chip_map_path,
+        *(ppl_root / "deps/chip" / layout.arch / "config_common.cmake" for layout in layouts),
         tilelang_path,
         tvm_path,
         host_c_path,
@@ -449,6 +450,8 @@ def capture_tpu_toolchain_identity(
             "ppl_arch": layout.arch,
             "physical_core_count": layout.physical_core_count,
             "compile_definitions": list(layout.compile_definitions),
+            "compile_configuration": file_content_identity(
+                ppl_root / "deps/chip" / layout.arch / "config_common.cmake"),
             "kernel_include_tree": tree_content_identity(layout.kernel_include),
             "backend_tree": tree_content_identity(layout.backend_lib),
             "emulator_library": file_content_identity(layout.emulator_library),

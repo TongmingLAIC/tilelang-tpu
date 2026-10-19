@@ -45,7 +45,7 @@ def _fake_trace_worker(label: str, programming_model: str = "tpukernel", sleep_s
               "label = os.environ['FILE_DUMP_CMD']\n"
               "assert '/' not in label\n"
               "assert os.environ['TPU_RT_CORE_NUM'] == '4'\n"
-              "assert os.environ['TILELANG_TPU_PROFILE_CHIP'] == 'sg2260e'\n"
+              "assert os.environ['TILELANG_TPU_PROFILE_CHIP'] == 'bm1690e'\n"
               "assert os.environ['TILELANG_TPU_PROFILE_PROGRAMMING_MODEL'] == "
               f"'{programming_model}'\n"
               "assert os.environ['TILELANG_TPU_PROFILE_RUNTIME_MODE'] == 'cmodel'\n"
@@ -80,7 +80,7 @@ def _fake_pcie_trace_worker(programming_model: str = "tpukernel",
               "from pathlib import Path\n"
               "assert 'FILE_DUMP_CMD' not in os.environ\n"
               "assert os.environ['TILELANG_TPU_PROFILE_SESSION'] == '1'\n"
-              "assert os.environ['TILELANG_TPU_PROFILE_CHIP'] == 'sg2260e'\n"
+              "assert os.environ['TILELANG_TPU_PROFILE_CHIP'] == 'bm1690e'\n"
               "assert os.environ['TILELANG_TPU_PROFILE_PROGRAMMING_MODEL'] == "
               f"'{programming_model}'\n"
               "assert os.environ['TILELANG_TPU_PROFILE_RUNTIME_MODE'] == 'pcie'\n"
@@ -137,7 +137,7 @@ def _create_fake_pcie_decoder_packages(root: Path) -> Path:
     return package_root
 
 
-def _create_fake_perfai(root: Path, expected_chip: str = "sg2260e", sleep_s: float = 0.0) -> Path:
+def _create_fake_perfai(root: Path, expected_chip: str = "bm1690e", sleep_s: float = 0.0) -> Path:
     perfai_root = root / "PerfAI"
     perfai_root.mkdir()
     runner = perfai_root / "AutoRunner.sh"
@@ -169,7 +169,7 @@ def _create_fake_perfai(root: Path, expected_chip: str = "sg2260e", sleep_s: flo
 def test_cmodel_profile_worker_uses_a_private_cwd_and_keeps_raw_trace(tmp_path):
     output_dir = tmp_path / "profile"
     config = TPUProfilingConfig(
-        chip="sg2260e", output_dir=output_dir, label="unit-trace", postprocess=False)
+        chip="bm1690e", output_dir=output_dir, label="unit-trace", postprocess=False)
 
     report = run_tpu_cmodel_profile(
         _fake_trace_worker(config.label),
@@ -201,7 +201,7 @@ def test_cmodel_profile_worker_uses_a_private_cwd_and_keeps_raw_trace(tmp_path):
 
 def test_default_profile_output_is_discoverable_and_not_system_tmp(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    config = TPUProfilingConfig(chip="sg2260e", label="local-output", postprocess=False)
+    config = TPUProfilingConfig(chip="bm1690e", label="local-output", postprocess=False)
 
     report = TPUInstructionProfiler(config).run_cmodel(_fake_trace_worker(config.label))
 
@@ -211,7 +211,7 @@ def test_default_profile_output_is_discoverable_and_not_system_tmp(tmp_path, mon
 def test_cmodel_profile_runs_explicit_perfai_and_returns_instruction_durations(tmp_path):
     perfai_root = _create_fake_perfai(tmp_path)
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         output_dir=tmp_path / "profile",
         label="unit-trace",
         perfai_root=perfai_root,
@@ -266,10 +266,10 @@ def test_profile_parser_keeps_host_events_out_of_instruction_timings(tmp_path):
            ] == [("bdc", 3, "tiu_mul", 5.0)]
 
 
-def test_rv_profile_uses_the_vendor_perfai_target_spelling(tmp_path):
-    perfai_root = _create_fake_perfai(tmp_path, expected_chip="sg2260erv")
+def test_rv_profile_without_sdk_uses_the_canonical_decoder_name(tmp_path):
+    perfai_root = _create_fake_perfai(tmp_path, expected_chip="bm1690erv")
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         programming_model="rv",
         output_dir=tmp_path / "profile",
         label="unit-trace",
@@ -284,18 +284,37 @@ def test_rv_profile_uses_the_vendor_perfai_target_spelling(tmp_path):
     assert report.parser_status == "ready"
 
 
+@pytest.mark.parametrize("model,expected", [
+    ("tpukernel", "vendor_decoder_e"),
+    ("rv", "vendor_decoder_rv"),
+])
+def test_perfai_decoder_alias_is_resolved_from_sdk_architecture(tmp_path, model, expected):
+    from tilelang.jit.adapter.tpu_profiling import _perfai_chip_name
+
+    mapping = tmp_path / "deps/chip/chip_map.json"
+    mapping.parent.mkdir(parents=True)
+    mapping.write_text(json.dumps({
+        "vendor_decoder_e": "tpub_7_1_e",
+        "vendor_decoder_rv": "tpub_7_1_e_rv",
+    }))
+    config = TPUProfilingConfig(chip="BM1690E", programming_model=model)
+
+    assert _perfai_chip_name(config, {"PPL_PROJECT_ROOT": str(tmp_path)}) == expected
+    assert config.chip == "bm1690e"
+
+
 def test_profile_config_rejects_invalid_chip_model_and_nonfinite_timeout():
     with pytest.raises(ValueError, match="does not support programming model.*rv"):
         TPUProfilingConfig(chip="bm1690", programming_model="rv")
     with pytest.raises(ValueError, match="Unsupported TPU programming model"):
-        TPUProfilingConfig(chip="sg2260e", programming_model="legacy")
+        TPUProfilingConfig(chip="bm1690e", programming_model="legacy")
     with pytest.raises(ValueError, match="positive number"):
-        TPUProfilingConfig(chip="sg2260e", timeout_s=float("nan"))
+        TPUProfilingConfig(chip="bm1690e", timeout_s=float("nan"))
     with pytest.raises(ValueError, match="positive number"):
-        TPUProfilingConfig(chip="sg2260e", timeout_s=float("inf"))
-    config = TPUProfilingConfig(chip="sg2260e", programming_model="tpukernel")
+        TPUProfilingConfig(chip="bm1690e", timeout_s=float("inf"))
+    config = TPUProfilingConfig(chip="bm1690e", programming_model="tpukernel")
     assert config.programming_model == "tpukernel"
-    assert config.target_spec == TPUTargetSpec("sg2260e", "tpukernel")
+    assert config.target_spec == TPUTargetSpec("bm1690e", "tpukernel")
     assert config.target_spec.chip_spec.physical_core_count == 4
     assert config.runtime_config == TPURuntimeConfig("cmodel")
 
@@ -314,12 +333,12 @@ def test_profiler_preflights_only_the_selected_runtime_contract(monkeypatch, run
         return FakeLayout()
 
     monkeypatch.setattr(tpu_profiling_module, "resolve_ppl_layout", fake_resolve)
-    profiler = TPUInstructionProfiler(TPUProfilingConfig(chip="sg2260e", runtime_mode=runtime_mode))
+    profiler = TPUInstructionProfiler(TPUProfilingConfig(chip="bm1690e", runtime_mode=runtime_mode))
 
     profiler._validate_ppl_dependencies({"PPL_PROJECT_ROOT": "/ppl-1.7"})
 
     assert calls == [
-        ("/ppl-1.7", "sg2260e"),
+        ("/ppl-1.7", "bm1690e"),
         (runtime_mode, "/ppl-1.7"),
     ]
 
@@ -330,14 +349,14 @@ def test_profiler_allows_generic_parser_worker_without_a_ppl_sdk(monkeypatch):
         "resolve_ppl_layout",
         lambda *_args: pytest.fail("generic worker must not resolve PPL"),
     )
-    profiler = TPUInstructionProfiler(TPUProfilingConfig(chip="sg2260e"))
+    profiler = TPUInstructionProfiler(TPUProfilingConfig(chip="bm1690e"))
 
     profiler._validate_ppl_dependencies({})
 
 
 def test_cmodel_profile_timeout_terminates_the_worker_process_group(tmp_path):
     config = TPUProfilingConfig(
-        chip="sg2260e", output_dir=tmp_path, timeout_s=0.1, postprocess=False)
+        chip="bm1690e", output_dir=tmp_path, timeout_s=0.1, postprocess=False)
     command = [
         sys.executable,
         "-c",
@@ -395,7 +414,7 @@ def test_profile_rejects_success_with_lingering_descendant(tmp_path, monkeypatch
     monkeypatch.setattr(tpu_profiling_module, "_PROCESS_KILL_GRACE_S", 0.5)
 
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         runtime_mode=runtime_mode,
         output_dir=tmp_path / f"{runtime_mode}-profile",
         timeout_s=3.0,
@@ -480,7 +499,7 @@ def test_profile_deadline_covers_worker_and_perfai_runtime(tmp_path):
 
     perfai_root = _create_fake_perfai(tmp_path, sleep_s=30)
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         output_dir=tmp_path / "profile",
         label="deadline",
         perfai_root=perfai_root,
@@ -527,7 +546,7 @@ def test_profile_deadline_covers_perfai_lock_wait(tmp_path):
         assert holder.stdout is not None
         assert holder.stdout.readline().strip() == "locked"
         config = TPUProfilingConfig(
-            chip="sg2260e",
+            chip="bm1690e",
             output_dir=tmp_path / "profile",
             label="lock-deadline",
             perfai_root=perfai_root,
@@ -749,7 +768,7 @@ def test_tpukernel_matrix_timeout_has_bounded_pipe_drain(tmp_path, monkeypatch):
             Path(__file__).resolve().parents[3],
             tmp_path / "matrix",
             worker_path,
-            "sg2260e",
+            "bm1690e",
             case,
         )
         elapsed = time.monotonic() - started
@@ -838,7 +857,7 @@ def test_tpukernel_matrix_rejects_success_with_lingering_descendant(tmp_path, mo
             Path(__file__).resolve().parents[3],
             tmp_path / "matrix-lingering",
             worker_path,
-            "sg2260e",
+            "bm1690e",
             case,
         )
         _wait_for_file(child_pid_path)
@@ -860,7 +879,7 @@ def test_tpukernel_matrix_rejects_success_with_lingering_descendant(tmp_path, mo
 
 
 def test_pcie_profile_environment_requires_two_acknowledgements():
-    profiler = TPUInstructionProfiler(TPUProfilingConfig(chip="sg2260e", runtime_mode="pcie"))
+    profiler = TPUInstructionProfiler(TPUProfilingConfig(chip="bm1690e", runtime_mode="pcie"))
 
     with pytest.raises(TPUProfilingError, match="ALLOW_PCIE_LOAD"):
         profiler.pcie_profile_environment_overrides({})
@@ -893,7 +912,7 @@ def test_pcie_decoder_config_normalizes_only_explicit_pcie_paths(tmp_path):
     package_path.mkdir()
 
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         runtime_mode="pcie",
         pcie_decoder_python=decoder_path,
         pcie_decoder_pythonpath=[package_path],
@@ -903,19 +922,19 @@ def test_pcie_decoder_config_normalizes_only_explicit_pcie_paths(tmp_path):
     assert config.pcie_decoder_pythonpath == (package_path.resolve(),)
     with pytest.raises(ValueError, match="only valid"):
         TPUProfilingConfig(
-            chip="sg2260e",
+            chip="bm1690e",
             runtime_mode="cmodel",
             pcie_decoder_pythonpath=(package_path,),
         )
     with pytest.raises(TypeError, match="sequence"):
         TPUProfilingConfig(
-            chip="sg2260e",
+            chip="bm1690e",
             runtime_mode="pcie",
             pcie_decoder_pythonpath=package_path,
         )
     with pytest.raises(ValueError, match="not a directory or importable"):
         TPUProfilingConfig(
-            chip="sg2260e",
+            chip="bm1690e",
             runtime_mode="pcie",
             pcie_decoder_pythonpath=(tmp_path / "missing",),
         )
@@ -929,7 +948,7 @@ def test_pcie_decoder_pythonpath_accepts_importable_archive(tmp_path):
         output.writestr("decoder_package/__init__.py", "")
 
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         runtime_mode="pcie",
         pcie_decoder_pythonpath=(archive,),
     )
@@ -945,7 +964,7 @@ def test_pcie_decoder_python_preserves_virtualenv_symlink(tmp_path):
     virtualenv_launcher.symlink_to(interpreter)
 
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         runtime_mode="pcie",
         pcie_decoder_python=virtualenv_launcher,
     )
@@ -957,7 +976,7 @@ def test_pcie_decoder_python_preserves_virtualenv_symlink(tmp_path):
 def test_pcie_decoder_preflight_is_offline_and_returns_api_identity(tmp_path):
     package_root = _create_fake_pcie_decoder_packages(tmp_path)
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         runtime_mode="pcie",
         pcie_decoder_python=sys.executable,
         pcie_decoder_pythonpath=(package_root,),
@@ -977,7 +996,7 @@ def test_pcie_decoder_preflight_reports_only_the_required_package(tmp_path, monk
     missing_decoder = tmp_path / "missing_decoder.py"
     missing_decoder.write_text("raise SystemExit(3)\n", encoding="utf-8")
     monkeypatch.setattr(tpu_profiling_module, "_PCIE_PROFILE_DECODER_PATH", missing_decoder)
-    profiler = TPUInstructionProfiler(TPUProfilingConfig(chip="sg2260e", runtime_mode="pcie"))
+    profiler = TPUInstructionProfiler(TPUProfilingConfig(chip="bm1690e", runtime_mode="pcie"))
 
     with pytest.raises(TPUProfilingError, match="preinstalled bigTpuProfile") as exc_info:
         profiler.preflight_pcie_decoder(environment=_pcie_profile_environment())
@@ -987,7 +1006,7 @@ def test_pcie_decoder_preflight_reports_only_the_required_package(tmp_path, monk
 
 def test_pcie_profile_worker_isolated_and_keeps_raw_trace(tmp_path):
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         programming_model="rv",
         runtime_mode="pcie",
         output_dir=tmp_path / "profile",
@@ -1017,7 +1036,7 @@ def test_pcie_profile_worker_isolated_and_keeps_raw_trace(tmp_path):
 def test_pcie_profile_rejects_empty_or_unrecognized_raw_artifacts(tmp_path, profile_name,
                                                                   profile_payload):
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         runtime_mode="pcie",
         output_dir=tmp_path / "profile",
         postprocess=False,
@@ -1034,7 +1053,7 @@ def test_pcie_profile_rejects_empty_or_unrecognized_raw_artifacts(tmp_path, prof
 
 def test_pcie_profile_requires_all_gates_before_spawning(tmp_path):
     profiler = TPUInstructionProfiler(
-        TPUProfilingConfig(chip="sg2260e", runtime_mode="pcie", output_dir=tmp_path))
+        TPUProfilingConfig(chip="bm1690e", runtime_mode="pcie", output_dir=tmp_path))
 
     with pytest.raises(TPUProfilingError, match="ALLOW_PCIE_PROFILE"):
         profiler.run_pcie(
@@ -1279,7 +1298,7 @@ def test_pcie_profile_decodes_with_preinstalled_vendor_packages(tmp_path):
     inherited_pythonpath = os.environ.get("PYTHONPATH", "")
     pythonpath = os.pathsep.join(item for item in (str(package_root), inherited_pythonpath) if item)
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         programming_model="rv",
         runtime_mode="pcie",
         output_dir=tmp_path / "profile",
@@ -1301,7 +1320,7 @@ def test_pcie_profile_decodes_with_preinstalled_vendor_packages(tmp_path):
 def test_explicit_pcie_decoder_pythonpath_never_reaches_profile_worker(tmp_path):
     package_root = _create_fake_pcie_decoder_packages(tmp_path)
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         programming_model="rv",
         runtime_mode="pcie",
         output_dir=tmp_path / "profile",
@@ -1331,7 +1350,7 @@ def test_pcie_decoder_requires_canonical_tilelang_json(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(tpu_profiling_module, "_PCIE_PROFILE_DECODER_PATH", decoder)
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         programming_model="rv",
         runtime_mode="pcie",
         output_dir=tmp_path / "profile",
@@ -1404,7 +1423,7 @@ def test_pcie_canonical_decoder_report_rejects_invalid_timing(tmp_path, event_up
 
 def test_cmodel_runner_rejects_a_pcie_configuration_before_spawning(tmp_path):
     profiler = TPUInstructionProfiler(
-        TPUProfilingConfig(chip="sg2260e", runtime_mode="pcie", output_dir=tmp_path))
+        TPUProfilingConfig(chip="bm1690e", runtime_mode="pcie", output_dir=tmp_path))
 
     with pytest.raises(TPUProfilingError, match="not dispatched"):
         profiler.run_cmodel([sys.executable, "-c", "raise SystemExit(0)"])
@@ -1491,16 +1510,16 @@ def _assert_profile_worker_result(report, *, case: str, runtime_mode: str):
     os.environ.get("TILELANG_TPU_RUN_CMODEL_PROFILE") != "1",
     reason="set TILELANG_TPU_RUN_CMODEL_PROFILE=1 for the isolated CModel profile worker",
 )
-def test_sg2260e_tpukernel_cmodel_profile_worker_collects_real_raw_trace(tmp_path):
+def test_bm1690e_tpukernel_cmodel_profile_worker_collects_real_raw_trace(tmp_path):
     """Opt-in end-to-end test: fresh compile, numerical check, and raw command dump."""
 
     if not os.environ.get("PPL_PROJECT_ROOT"):
         pytest.skip("PPL_PROJECT_ROOT is not configured")
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         programming_model="tpukernel",
         output_dir=tmp_path,
-        label="sg2260e-tpukernel-matmul",
+        label="bm1690e-tpukernel-matmul",
         timeout_s=60,
     )
 
@@ -1517,16 +1536,16 @@ def test_sg2260e_tpukernel_cmodel_profile_worker_collects_real_raw_trace(tmp_pat
     os.environ.get("TILELANG_TPU_RUN_CMODEL_PROFILE") != "1",
     reason="set TILELANG_TPU_RUN_CMODEL_PROFILE=1 for the isolated CModel profile worker",
 )
-def test_sg2260e_rv_cmodel_profile_worker_runs_control_path(tmp_path):
+def test_bm1690e_rv_cmodel_profile_worker_runs_control_path(tmp_path):
     """Opt-in RV control-path test, intentionally not an RV tensor numeric claim."""
 
     if not os.environ.get("PPL_PROJECT_ROOT"):
         pytest.skip("PPL_PROJECT_ROOT is not configured")
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         programming_model="rv",
         output_dir=tmp_path,
-        label="sg2260e-rv-control",
+        label="bm1690e-rv-control",
         timeout_s=60,
         postprocess=False,
     )
@@ -1542,17 +1561,17 @@ def test_sg2260e_rv_cmodel_profile_worker_runs_control_path(tmp_path):
     os.environ.get("TILELANG_TPU_RUN_PCIE_PROFILE") != "1",
     reason="set TILELANG_TPU_RUN_PCIE_PROFILE=1 for the isolated PCIe profile worker",
 )
-def test_sg2260e_tpukernel_pcie_profile_worker_collects_real_raw_trace(tmp_path):
+def test_bm1690e_tpukernel_pcie_profile_worker_collects_real_raw_trace(tmp_path):
     """Opt-in board test: numerical matmul plus TPUDNN recorder output."""
 
     if not os.environ.get("PPL_PROJECT_ROOT"):
         pytest.skip("PPL_PROJECT_ROOT is not configured")
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         programming_model="tpukernel",
         runtime_mode="pcie",
         output_dir=tmp_path,
-        label="sg2260e-pcie-tpukernel-matmul",
+        label="bm1690e-pcie-tpukernel-matmul",
         timeout_s=60,
     )
 
@@ -1570,17 +1589,17 @@ def test_sg2260e_tpukernel_pcie_profile_worker_collects_real_raw_trace(tmp_path)
     os.environ.get("TILELANG_TPU_RUN_PCIE_PROFILE") != "1",
     reason="set TILELANG_TPU_RUN_PCIE_PROFILE=1 for the isolated PCIe profile worker",
 )
-def test_sg2260e_rv_pcie_profile_worker_runs_control_path(tmp_path):
+def test_bm1690e_rv_pcie_profile_worker_runs_control_path(tmp_path):
     """Opt-in RV board control-path test, not RV tensor arithmetic proof."""
 
     if not os.environ.get("PPL_PROJECT_ROOT"):
         pytest.skip("PPL_PROJECT_ROOT is not configured")
     config = TPUProfilingConfig(
-        chip="sg2260e",
+        chip="bm1690e",
         programming_model="rv",
         runtime_mode="pcie",
         output_dir=tmp_path,
-        label="sg2260e-pcie-rv-control",
+        label="bm1690e-pcie-rv-control",
         timeout_s=60,
         postprocess=False,
     )

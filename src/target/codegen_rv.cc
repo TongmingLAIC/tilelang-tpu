@@ -18,7 +18,7 @@
  */
 
 /*! \file target/codegen_rv.cc
- *  \brief SG2260E RV Tensor instruction selection for portable TPU ops.
+ *  \brief BM1690E RV Tensor instruction selection for portable TPU ops.
  */
 
 #include "codegen_tpu.h"
@@ -301,7 +301,7 @@ void CodeGenTileLangTPU::EmitRVElementwise(
 
   EmitRVDescriptor(src0, 8, false, RVDTypeName(src0_dtype), true);
   if (rhs_w_broadcast) {
-    // The SG2260E CModel does not expand a shape-(M,1) TR merely because the
+    // The BM1690E CModel does not expand a shape-(M,1) TR merely because the
     // peer/output TR has width W. Describe the same storage as an (M,W) free
     // view with zero W stride. This is a descriptor-only broadcast: no LMEM
     // expansion, extra instruction, or out-of-bounds read is introduced.

@@ -15,7 +15,7 @@ from tilelang.jit.adapter.ppl_layout import resolve_ppl_layout
 from tilelang.jit.adapter.wrapper import TLWrapper
 
 
-def _tpu_target(chip="sg2260e", programming_model="rv"):
+def _tpu_target(chip="bm1690e", programming_model="rv"):
     return (f"tpu -mcpu={chip} "
             f"-tpu-programming-model={programming_model}")
 
@@ -77,10 +77,10 @@ def test_rvt_frontend_emits_vendor_extern_calls():
 def test_rvt_lowering_keeps_explicit_vendor_calls():
     artifact = tilelang.lower(
         _rvt_codegen_primfunc,
-        target=_tpu_target("sg2260e", "rv"),
+        target=_tpu_target("bm1690e", "rv"),
         runtime_mode="cmodel",
     )
-    assert artifact.tpu_target == TPUTargetSpec("sg2260e", "rv")
+    assert artifact.tpu_target == TPUTargetSpec("bm1690e", "rv")
     assert artifact.tpu_runtime == TPURuntimeConfig("cmodel")
     source = artifact.kernel_source
     assert '#ifndef TILELANG_TPU_RV' in source
@@ -93,7 +93,7 @@ def test_rvt_lowering_keeps_explicit_vendor_calls():
     with pytest.raises(ValueError, match=r"programming.model.*tpukernel.*rvt_fadd"):
         tilelang.lower(
             _rvt_codegen_primfunc,
-            target=_tpu_target("sg2260e", "tpukernel"),
+            target=_tpu_target("bm1690e", "tpukernel"),
             runtime_mode="cmodel",
         )
 
@@ -109,7 +109,7 @@ def test_raw_rvt_cannot_consume_tilelang_buffer_descriptors():
             ValueError, match=r"raw-rvt-descriptor-argument.*rvt_dma_ld.*descriptor Var"):
         tilelang.lower(
             raw_descriptor_argument,
-            target=_tpu_target("sg2260e", "rv"),
+            target=_tpu_target("bm1690e", "rv"),
             runtime_mode="cmodel",
         )
 
@@ -121,7 +121,7 @@ def test_raw_rvt_cannot_consume_tilelang_buffer_descriptors():
             tvm.error.TVMError, match=r"rvt_dma_ld.*cannot consume TileLang tensor descriptor Var"):
         codegen(
             tvm.IRModule({"raw_descriptor_argument": native_function}),
-            tvm.target.Target(_tpu_target("sg2260e", "rv")),
+            tvm.target.Target(_tpu_target("bm1690e", "rv")),
         )
 
     parameter = raw_descriptor_argument.params[0]
@@ -136,7 +136,7 @@ def test_raw_rvt_cannot_consume_tilelang_buffer_descriptors():
             tvm.error.TVMError, match=r"rvt_dma_ld.*cannot consume TileLang tensor descriptor Var"):
         codegen(
             tvm.IRModule({"raw_parameter_handle": parameter_function}),
-            tvm.target.Target(_tpu_target("sg2260e", "rv")),
+            tvm.target.Target(_tpu_target("bm1690e", "rv")),
         )
 
 
@@ -151,7 +151,7 @@ def test_raw_rvt_symbol_must_be_a_c_identifier_at_both_boundaries():
     with pytest.raises(ValueError, match=r"raw-rvt-symbol.*rvt_bad-name"):
         tilelang.lower(
             module,
-            target=_tpu_target("sg2260e", "rv"),
+            target=_tpu_target("bm1690e", "rv"),
             runtime_mode="cmodel",
         )
 
@@ -159,7 +159,7 @@ def test_raw_rvt_symbol_must_be_a_c_identifier_at_both_boundaries():
     with pytest.raises(tvm.error.TVMError, match=r"C identifier beginning with rvt_.*rvt_bad-name"):
         codegen(
             module,
-            tvm.target.Target(_tpu_target("sg2260e", "rv")),
+            tvm.target.Target(_tpu_target("bm1690e", "rv")),
         )
 
 
@@ -172,7 +172,7 @@ def test_tpu_codegen_rejects_a_multifunction_runtime_module():
     with pytest.raises(tvm.error.TVMError, match="exactly one PrimFunc"):
         tilelang.lower(
             module,
-            target=_tpu_target("sg2260e", "rv"),
+            target=_tpu_target("bm1690e", "rv"),
             runtime_mode="cmodel",
         )
 
@@ -180,11 +180,11 @@ def test_tpu_codegen_rejects_a_multifunction_runtime_module():
 def test_tpukernel_externs_have_a_separate_programming_model_fence():
     source = tilelang.lower(
         _tpukernel_fill_primfunc,
-        target=_tpu_target("sg2260e", "tpukernel"),
+        target=_tpu_target("bm1690e", "tpukernel"),
         runtime_mode="cmodel",
     ).kernel_source
 
-    assert "/* TileLang TPU target: sg2260e, programming model: tpukernel */" in source
+    assert "/* TileLang TPU target: bm1690e, programming model: tpukernel */" in source
     assert '#ifndef TILELANG_TPU_TPUKERNEL' in source
     assert '#error "TPU-Kernel externs require -tpu-programming-model=tpukernel"' in source
 
@@ -205,7 +205,7 @@ def test_raw_tpukernel_extern_is_not_a_supported_tir_abi(extern_name, programmin
     with pytest.raises(ValueError, match=rf"Raw tpu_\* call_extern.*{extern_name}"):
         tilelang.lower(
             module,
-            target=_tpu_target("sg2260e", programming_model),
+            target=_tpu_target("bm1690e", programming_model),
             runtime_mode="cmodel",
         )
 
@@ -223,7 +223,7 @@ def test_native_codegen_fences_contractless_direct_ffi_externs(extern_name, prog
     ).with_attr("global_symbol", "native_model_fence")
     target = tvm.target.Target({
         "kind": "tpu",
-        "mcpu": "sg2260e",
+        "mcpu": "bm1690e",
         "tpu-programming-model": programming_model,
     })
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
@@ -255,27 +255,27 @@ def test_native_codegen_ignores_workload_model_metadata_for_chip_selection():
     ).with_attr("global_symbol", "workload_model_metadata")
     target = tvm.target.Target({
         "kind": "tpu",
-        "mcpu": "sg2260e",
+        "mcpu": "bm1690e",
         "model": "matmul_smoke",
         "tpu-programming-model": "rv",
     })
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
     source = codegen(tvm.IRModule({"workload_model_metadata": raw_extern}), target)
-    assert "TileLang TPU target: sg2260e, programming model: rv" in source
+    assert "TileLang TPU target: bm1690e, programming model: rv" in source
 
 
-def test_local_sg2260e_ppl_rvt_header_if_sdk_is_configured():
+def test_local_bm1690e_ppl_rvt_header_if_sdk_is_configured():
     """A real SDK check is opt-in, so unit tests remain hermetic by default."""
     ppl_root = os.environ.get("PPL_PROJECT_ROOT")
     if not ppl_root:
         pytest.skip("PPL_PROJECT_ROOT is not configured")
-    layout = resolve_ppl_layout(ppl_root, "sg2260e")
+    layout = resolve_ppl_layout(ppl_root, "bm1690e")
     assert layout.require_rvt_api().name == "rvt_api.h"
 
     generator = LibraryGenerator(
-        tvm.target.Target(_tpu_target("sg2260e", "rv")),
-        tpu_target=TPUTargetSpec("sg2260e", "rv"),
+        tvm.target.Target(_tpu_target("bm1690e", "rv")),
+        tpu_target=TPUTargetSpec("bm1690e", "rv"),
         tpu_runtime=TPURuntimeConfig("cmodel"),
     )
     try:
@@ -292,9 +292,9 @@ def test_rvt_cmodel_compile_is_private_if_sdk_is_configured():
     if not os.environ.get("PPL_PROJECT_ROOT"):
         pytest.skip("PPL_PROJECT_ROOT is not configured")
 
-    target_spec = TPUTargetSpec("sg2260e", "rv")
+    target_spec = TPUTargetSpec("bm1690e", "rv")
     runtime_config = TPURuntimeConfig("cmodel")
-    target = tvm.target.Target(_tpu_target("sg2260e", "rv"))
+    target = tvm.target.Target(_tpu_target("bm1690e", "rv"))
     artifact = tilelang.lower(
         _rvt_codegen_primfunc,
         target=target,
@@ -326,13 +326,13 @@ def test_rvt_cmodel_compile_is_private_if_sdk_is_configured():
 
 
 def test_tpukernel_pcie_compile_is_private_if_sdk_is_configured():
-    """Build an SG2260E PPL kernel for PCIe without dlopen or dispatching it."""
+    """Build a BM1690E PPL kernel for PCIe without dlopen or dispatching it."""
     if not os.environ.get("PPL_PROJECT_ROOT"):
         pytest.skip("PPL_PROJECT_ROOT is not configured")
 
-    target_spec = TPUTargetSpec("sg2260e", "tpukernel")
+    target_spec = TPUTargetSpec("bm1690e", "tpukernel")
     runtime_config = TPURuntimeConfig("pcie")
-    target = tvm.target.Target(_tpu_target("sg2260e", "tpukernel"))
+    target = tvm.target.Target(_tpu_target("bm1690e", "tpukernel"))
     artifact = tilelang.lower(
         _tpukernel_fill_primfunc,
         target=target,
@@ -351,7 +351,7 @@ def test_tpukernel_pcie_compile_is_private_if_sdk_is_configured():
         assert (workspace / "libkernel.so").is_file()
         assert (workspace / "main.so").is_file()
         source = (workspace / "kernel.c").read_text(encoding="utf-8")
-        assert "TileLang TPU target: sg2260e" in source
+        assert "TileLang TPU target: bm1690e" in source
         assert "TPU-Kernel externs require -tpu-programming-model=tpukernel" in source
         header = (workspace / "kernel.h").read_text(encoding="utf-8")
         assert "__bm1690__" not in header
@@ -371,9 +371,9 @@ def test_rvt_pcie_compile_is_private_without_loading_if_sdk_is_configured():
     if not os.environ.get("PPL_PROJECT_ROOT"):
         pytest.skip("PPL_PROJECT_ROOT is not configured")
 
-    target_spec = TPUTargetSpec("sg2260e", "rv")
+    target_spec = TPUTargetSpec("bm1690e", "rv")
     runtime_config = TPURuntimeConfig("pcie")
-    target = tvm.target.Target(_tpu_target("sg2260e", "rv"))
+    target = tvm.target.Target(_tpu_target("bm1690e", "rv"))
     artifact = tilelang.lower(
         _rvt_codegen_primfunc,
         target=target,

@@ -1,6 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-"""One supervised SG2260E numerical and timing session for pipeline add."""
+"""One supervised BM1690E numerical and timing session for pipeline add."""
 
 from __future__ import annotations
 
@@ -33,9 +33,9 @@ def main() -> int:
 
     torch.set_num_threads(1)
     record = json.loads(open(args.cmodel_json, encoding="utf-8").read())
-    if record.get("status") != "passed" or record.get("chip") != "sg2260e" or not record.get("exact"):
-        raise RuntimeError("board candidate has no successful SG2260E CModel gate")
-    target = tvm.target.Target("tpu -mcpu=sg2260e -tpu-programming-model=tpukernel")
+    if record.get("status") != "passed" or record.get("chip") != "bm1690e" or not record.get("exact"):
+        raise RuntimeError("board candidate has no successful BM1690E CModel gate")
+    target = tvm.target.Target("tpu -mcpu=bm1690e -tpu-programming-model=tpukernel")
     kernel = tilelang.compile(
         build_pipeline_add(tiles=record["tiles"], tile_width=record["tile_width"],
                            pipelined=record["pipelined"]),
@@ -73,7 +73,7 @@ def main() -> int:
     output_hash = hashlib.sha256(destination.view(torch.uint8).numpy().tobytes()).hexdigest()
     if output_hash != record["output_sha256"]:
         raise AssertionError("board output differs from CModel-validated output")
-    payload = {"status": "passed", "chip": "sg2260e", "tiles": record["tiles"],
+    payload = {"status": "passed", "chip": "bm1690e", "tiles": record["tiles"],
                "tile_width": record["tile_width"], "pipelined": record["pipelined"],
                "address_policy": record["address_policy"],
                "kernel_source_sha256": source_hash, "address_map": addresses,

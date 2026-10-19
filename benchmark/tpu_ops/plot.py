@@ -133,7 +133,7 @@ def plot_operators(output, plt):
         status = {'complete': 'completed measurements',
                   'hardware_blocked': 'board quarantined; available measurements'}.get(
                       state.get('state'), 'measurements in progress')
-        fig.suptitle(f'{op} | SG2260E, one core, 1000 MHz | {status}', fontsize=15)
+        fig.suptitle(f'{op} | BM1690E, one core, 1000 MHz | {status}', fontsize=15)
         fig.text(
             .5,
             .012, 'Top rows: independent tile search. Bottom row: same-tile algorithm controls. '
@@ -148,7 +148,7 @@ def plot_operators(output, plt):
         plt.close(fig)
     fig, axis = plt.subplots(figsize=(12, 4))
     axis.axis('off')
-    axis.set_title('MoE demo / SG2260E: skipped before board execution', fontsize=14)
+    axis.set_title('MoE demo / BM1690E: skipped before board execution', fontsize=14)
     table = axis.table(
         cellText=[['RV', 'TopK lowering rejected', 'No full-kernel timing'],
                   ['TPUKernel', 'TopK lowering rejected', 'No full-kernel timing']],
@@ -157,7 +157,7 @@ def plot_operators(output, plt):
     table.auto_set_font_size(False)
     table.set_fontsize(11)
     table.scale(1, 2)
-    fig.text(.5, .12, 'The current SG2260E target rejects tpu_hau_sort_natural_index.\n'
+    fig.text(.5, .12, 'The current BM1690E target rejects tpu_hau_sort_natural_index.\n'
              'This limits the demo routing path; it does not imply all expert GEMMs are unsupported.',
              ha='center', fontsize=10)
     fig.tight_layout()
@@ -225,7 +225,7 @@ def main():
         ])
     axes[0].invert_yaxis()
     axes[0].legend(loc="lower left")
-    figure.suptitle("SG2260E, one TPU core — " +
+    figure.suptitle("BM1690E, one TPU core — " +
                     ("100-sample finalists" if finalized else "search in progress"))
     figure.text(
         0.5,

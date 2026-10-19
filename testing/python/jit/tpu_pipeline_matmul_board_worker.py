@@ -1,6 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-"""One supervised SG2260E session for the serial/pipelined GEMM experiment."""
+"""One supervised BM1690E session for the serial/pipelined GEMM experiment."""
 
 from __future__ import annotations
 
@@ -48,10 +48,10 @@ def main() -> int:
 
     torch.set_num_threads(1)
     record = json.loads(args.cmodel_json.read_text())
-    if (record.get("status") != "passed" or record.get("chip") != "sg2260e" or
+    if (record.get("status") != "passed" or record.get("chip") != "bm1690e" or
             record.get("operation") != "matmul" or
             not record.get("metrics", {}).get("passed")):
-        raise RuntimeError("board GEMM candidate has no successful SG2260E CModel gate")
+        raise RuntimeError("board GEMM candidate has no successful BM1690E CModel gate")
     if args.persistent_benchmark and record.get("benchmark_runs", 0) < 1:
         raise RuntimeError("same-allocation board timing needs repeated-launch CModel validation")
     m, n, k, block_k = (record[name] for name in ("m", "n", "k", "block_k"))
@@ -60,7 +60,7 @@ def main() -> int:
                build_matmul(m=m, n=n, k=k, block_m=m, block_n=n,
                             block_k=block_k, dtype="float16",
                             programming_model="tpukernel"))
-    target = tvm.target.Target("tpu -mcpu=sg2260e -tpu-programming-model=tpukernel")
+    target = tvm.target.Target("tpu -mcpu=bm1690e -tpu-programming-model=tpukernel")
     pass_configs = {"tl.AddressAssignPolicy": record["address_policy"]}
     if record.get("replay_addresses") is not None:
         if record["address_policy"] != "replay":
@@ -103,7 +103,7 @@ def main() -> int:
     output_hash = digest(c)
     if output_hash != record["output_sha256"]:
         raise AssertionError("board GEMM output differs from CModel-validated output")
-    payload = {"status": "passed", "operation": "matmul", "chip": "sg2260e",
+    payload = {"status": "passed", "operation": "matmul", "chip": "bm1690e",
                "m": m, "n": n, "k": k, "block_k": block_k,
                "pipelined": record["pipelined"],
                "address_policy": record["address_policy"],

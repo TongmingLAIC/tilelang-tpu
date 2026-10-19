@@ -15,7 +15,7 @@ adapter_utils = importlib.import_module("tilelang.jit.adapter.utils")
 
 
 def _target(programming_model="tpukernel"):
-    return tvm.target.Target("tpu -mcpu=sg2260e "
+    return tvm.target.Target("tpu -mcpu=bm1690e "
                              f"-tpu-programming-model={programming_model}")
 
 

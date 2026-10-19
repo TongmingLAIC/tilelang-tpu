@@ -41,8 +41,8 @@ def _selection() -> Tuple[str, str, str, bool, Optional[int]]:
         if os.environ.get(name) != "1":
             raise RuntimeError(f"PCIe profile worker is missing {name}=1")
     raw_device_id = os.environ.get("TILELANG_TPU_DEVICE_ID", "")
-    if chip != "sg2260e":
-        raise RuntimeError("this machine's PCIe demo worker accepts only SG2260E")
+    if chip != "bm1690e":
+        raise RuntimeError("this machine's PCIe demo worker accepts only BM1690E")
     if (not raw_device_id.isascii() or not raw_device_id.isdecimal() or
             int(raw_device_id) > 2**31 - 1):
         raise RuntimeError("PCIe profile worker requires a non-negative 32-bit device id")

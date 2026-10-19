@@ -104,9 +104,9 @@ def validate_promotion_stages(
     """Load and validate ordered, single-chip CModel promotion evidence."""
 
     bm = _load_promotion_summary(bm_summary_path, "BM1690")
-    sg = _load_promotion_summary(sg_summary_path, "SG2260E")
+    sg = _load_promotion_summary(sg_summary_path, "BM1690E")
     if bm["_resolved_path"] == sg["_resolved_path"]:
-        raise RuntimeError("BM1690 and SG2260E promotion summaries must be different files")
+        raise RuntimeError("BM1690 and BM1690E promotion summaries must be different files")
 
     def validate_identity_and_scope(
         payload: Mapping[str, Any],
@@ -243,22 +243,22 @@ def validate_promotion_stages(
             raise RuntimeError(f"{label} promotion summary is not internally complete and passing")
 
     validate_identity_and_scope(bm, "BM1690", bm_allowed_scope)
-    validate_identity_and_scope(sg, "SG2260E", sg_allowed_scope)
+    validate_identity_and_scope(sg, "BM1690E", sg_allowed_scope)
 
     bm_started = _summary_time(bm, "started_at", "BM1690")
     bm_finished = _summary_time(bm, "finished_at", "BM1690")
-    sg_started = _summary_time(sg, "started_at", "SG2260E")
-    sg_finished = _summary_time(sg, "finished_at", "SG2260E")
+    sg_started = _summary_time(sg, "started_at", "BM1690E")
+    sg_finished = _summary_time(sg, "finished_at", "BM1690E")
     pcie_started = _summary_time({"started_at": pcie_started_at}, "started_at", "PCIe")
     if bm_started > bm_finished:
         raise RuntimeError("CModel promotion order is invalid: BM1690 starts after it finishes")
     if sg_started > sg_finished:
-        raise RuntimeError("CModel promotion order is invalid: SG2260E starts after it finishes")
+        raise RuntimeError("CModel promotion order is invalid: BM1690E starts after it finishes")
     if bm_finished > sg_started:
         raise RuntimeError(
-            "CModel promotion order is invalid: BM1690 must finish before SG2260E starts")
+            "CModel promotion order is invalid: BM1690 must finish before BM1690E starts")
     if sg_finished > pcie_started:
-        raise RuntimeError("promotion order is invalid: SG2260E must finish before PCIe starts")
+        raise RuntimeError("promotion order is invalid: BM1690E must finish before PCIe starts")
     return bm, sg
 
 

@@ -2,9 +2,9 @@
 # Licensed under the MIT License.
 """Run the TPU-Kernel numerical conformance matrix in isolated processes.
 
-The default matrix is CModel-only and covers BM1690 plus SG2260E. PCIe is
-restricted to SG2260E device 0 and requires two acknowledgements, an explicit
-case scope, and matching clean BM1690/SG2260E CModel summaries.
+The default matrix is CModel-only and covers BM1690 plus BM1690E. PCIe is
+restricted to BM1690E device 0 and requires two acknowledgements, an explicit
+case scope, and matching clean BM1690/BM1690E CModel summaries.
 Every case owns a fresh parent-death-supervised process group.  On a timeout
 or first failure, the runner sends SIGTERM to that group, waits a bounded
 grace interval, follows with SIGKILL if necessary, records the partial JSON
@@ -18,13 +18,13 @@ Examples::
 
     python testing/python/jit/tpukernel_ops_matrix.py \
         --output-dir research/artifacts/tpukernel-reductions \
-        --chip sg2260e --op reduce-sum --op reduce-max
+        --chip bm1690e --op reduce-sum --op reduce-max
 
     # Deliberately dangerous: use exact clean CModel summaries from this runner.
     python testing/python/jit/tpukernel_ops_matrix.py \
         --output-dir research/artifacts/tpukernel-pcie \
         --runtime-mode pcie --allow-pcie --allow-pcie-load \
-        --device-id 0 --chip sg2260e --op add \
+        --device-id 0 --chip bm1690e --op add \
         --bm-cmodel-summary research/artifacts/tpukernel-bm/summary.json \
         --sg-cmodel-summary research/artifacts/tpukernel-sg/summary.json
 """
@@ -199,7 +199,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sg-cmodel-summary",
         type=Path,
-        help="clean SG2260E CModel summary required to promote exact PCIe cases",
+        help="clean BM1690E CModel summary required to promote exact PCIe cases",
     )
     parser.add_argument(
         "--all-pcie-cases",
@@ -236,8 +236,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         if (isinstance(args.device_id, bool) or not isinstance(args.device_id, int) or
                 args.device_id != 0):
             raise RuntimeError("this single-card validation host accepts only --device-id 0")
-        if args.chips is None or tuple(dict.fromkeys(args.chips)) != ("sg2260e",):
-            raise RuntimeError("this machine can run PCIe cases only for explicit --chip sg2260e")
+        if args.chips is None or tuple(dict.fromkeys(args.chips)) != ("bm1690e",):
+            raise RuntimeError("this machine can run PCIe cases only for explicit --chip bm1690e")
         filters_selected = bool(args.operations or args.case_ids)
         if args.all_pcie_cases and (filters_selected or args.dtypes):
             raise RuntimeError(
@@ -361,10 +361,10 @@ def _validate_pcie_promotion(repo_root: Path, args: argparse.Namespace, cases: t
         matrix_kind=_MATRIX_KIND,
         schema_version=_SCHEMA_VERSION,
         bm_allowed_scope=(("bm1690", "tpukernel"),),
-        sg_allowed_scope=(("sg2260e", "tpukernel"),),
+        sg_allowed_scope=(("bm1690e", "tpukernel"),),
         pcie_started_at=pcie_started_at,
     )
-    for label, payload in (("BM1690", bm), ("SG2260E", sg)):
+    for label, payload in (("BM1690", bm), ("BM1690E", sg)):
         if payload.get("git_commit") != current["git_commit"]:
             raise RuntimeError(f"{label} TPU-Kernel summary commit does not match current source")
         if payload.get("source_state_sha256") != current["source_state_sha256"]:
@@ -402,11 +402,11 @@ def _validate_pcie_promotion(repo_root: Path, args: argparse.Namespace, cases: t
         return indexed
 
     bm_results = exact_results(bm, "bm1690")
-    sg_results = exact_results(sg, "sg2260e")
+    sg_results = exact_results(sg, "bm1690e")
     missing = []
     for case in cases:
         expected_case = _json_normalized(case.to_json())
-        for chip, results in (("bm1690", bm_results), ("sg2260e", sg_results)):
+        for chip, results in (("bm1690", bm_results), ("bm1690e", sg_results)):
             result = results.get(case.case_id)
             if result is None or result.get("status") != "passed":
                 missing.append(f"cmodel/{chip}/{case.case_id}")
@@ -425,8 +425,8 @@ def _validate_pcie_promotion(repo_root: Path, args: argparse.Namespace, cases: t
         "source_state_sha256": current["source_state_sha256"],
         "bm1690_summary": bm["_resolved_path"],
         "bm1690_summary_sha256": bm["_sha256"],
-        "sg2260e_summary": sg["_resolved_path"],
-        "sg2260e_summary_sha256": sg["_sha256"],
+        "bm1690e_summary": sg["_resolved_path"],
+        "bm1690e_summary_sha256": sg["_sha256"],
         "validated_case_count": len(cases),
     }
 

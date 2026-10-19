@@ -80,7 +80,7 @@ def build_tilelang(case, config, directory, sdk, model, runtime, variant):
     from tilelang.jit.adapter.wrapper import TLTPUSourceWrapper
     from .tilelang_variants import build_program
     program = build_program(case, config, model, variant)
-    target = tvm.target.Target(f"tpu -mcpu=sg2260e -tpu-programming-model={model}")
+    target = tvm.target.Target(f"tpu -mcpu=bm1690e -tpu-programming-model={model}")
     artifact = tilelang.lower(
         program,
         target=target,
@@ -102,7 +102,7 @@ def build_runner(case, config, directory, sdk, model, runtime, implementation):
     from tilelang.jit.adapter.ppl_layout import resolve_ppl_layout
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
-    layout = resolve_ppl_layout(sdk, "sg2260e")
+    layout = resolve_ppl_layout(sdk, "bm1690e")
     if runtime == "pcie":
         # PPL's RV register allocator is nondeterministic across invocations.
         # Cross-compile the exact CModel-validated device program, rather than
@@ -170,7 +170,7 @@ def build_runner(case, config, directory, sdk, model, runtime, implementation):
     header = (directory / "kernel.h").read_text()
     (directory / "chip_map.h").write_text(
         '#pragma once\n#include <unordered_map>\n#include <string>\n'
-        'static std::unordered_map<std::string,std::string> CHIP_MAP={{"sg2260e","tpub_7_1_e"}};\n')
+        'static std::unordered_map<std::string,std::string> CHIP_MAP={{"bm1690e","tpub_7_1_e"}};\n')
     match = re.search(rf"fill_{name}_struct\((.*?)\);", header, re.S)
     params = match.group(1).split(",") if match else []
     if not params or any("unsigned long long" not in p for p in params):

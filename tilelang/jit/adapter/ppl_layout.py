@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 import json
 import os
+import re
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
 
@@ -43,9 +44,23 @@ class PPLLayout:
 
     @property
     def compile_definitions(self) -> Tuple[str, ...]:
-        """Vendor compile definitions for the selected physical chip."""
+        """Combine canonical target macros with the installed SDK's definitions.
 
-        return get_tpu_chip_spec(self.chip).ppl_compile_definitions
+        Vendor header macros can retain SDK-specific chip names. Read those
+        names from the SDK's build configuration rather than exposing them as
+        TileLang target identities.
+        """
+
+        definitions = list(get_tpu_chip_spec(self.chip).ppl_compile_definitions)
+        configuration = self.root / "deps/chip" / self.arch / "config_common.cmake"
+        source = configuration.read_text(encoding="utf-8")
+        for declaration in re.findall(r"^\s*add_definitions\(([^)]*)\)", source, re.MULTILINE):
+            for flag in declaration.split():
+                if not re.fullmatch(r"-D[A-Za-z_]\w*", flag):
+                    raise ValueError(f"Unsupported PPL compile definition {flag!r} in {configuration}")
+                if flag[2:] not in definitions:
+                    definitions.append(flag[2:])
+        return tuple(definitions)
 
     def pcie_runtime_lib(self, environment: Optional[Mapping[str, str]] = None) -> Path:
         """Resolve the installed board runtime, never the SDK CModel runtime.

@@ -25,7 +25,7 @@ from tilelang.jit.kernel import JITKernel
 from tilelang.cache.kernel_cache import KernelCache
 
 
-def _tpu_target(chip="sg2260e", programming_model="tpukernel"):
+def _tpu_target(chip="bm1690e", programming_model="tpukernel"):
     return (f"tpu -mcpu={chip} "
             f"-tpu-programming-model={programming_model}")
 
@@ -34,7 +34,7 @@ def test_auto_target_never_implicitly_selects_a_tpu(monkeypatch):
     monkeypatch.setattr(target_utils, "check_cuda_availability", lambda: False)
     monkeypatch.setattr(target_utils, "check_hip_availability", lambda: False)
     # Toolchain/runtime environment is not a second compilation selector.
-    monkeypatch.setenv("TILELANG_TPU_CHIP", "sg2260e")
+    monkeypatch.setenv("TILELANG_TPU_CHIP", "bm1690e")
     monkeypatch.setenv("TILELANG_TPU_PROGRAMMING_MODEL", "rv")
     monkeypatch.setenv("PPL_PROJECT_ROOT", "/not/consulted/by-auto-target")
     with pytest.raises(ValueError, match="complete TPU target"):
@@ -70,7 +70,7 @@ def test_direct_tpu_phase_entrypoints_require_a_complete_target(phase):
         tvm.tir.Evaluate(0),
     ).with_attr("global_symbol", "incomplete_phase_target")
     mod = tvm.IRModule({"incomplete_phase_target": prim_func})
-    incomplete = tvm.target.Target("tpu -mcpu=sg2260e")
+    incomplete = tvm.target.Target("tpu -mcpu=bm1690e")
 
     with pytest.raises(ValueError, match="explicit programming model"):
         phase(mod, incomplete)
@@ -83,11 +83,11 @@ def test_direct_tpu_phase_entrypoints_require_a_complete_target(phase):
 @pytest.mark.parametrize("function_target,requested_target", [
     (
         _tpu_target("bm1690", "tpukernel"),
-        _tpu_target("sg2260e", "tpukernel"),
+        _tpu_target("bm1690e", "tpukernel"),
     ),
     (
-        _tpu_target("sg2260e", "rv"),
-        _tpu_target("sg2260e", "tpukernel"),
+        _tpu_target("bm1690e", "rv"),
+        _tpu_target("bm1690e", "tpukernel"),
     ),
 ])
 def test_direct_tpu_phase_entrypoints_reject_a_different_bound_identity(
@@ -104,7 +104,7 @@ def test_direct_tpu_phase_entrypoints_reject_a_different_bound_identity(
 
 
 def test_tpu_contract_is_revalidated_before_address_assignment(monkeypatch):
-    target = _tpu_target("sg2260e", "tpukernel")
+    target = _tpu_target("bm1690e", "tpukernel")
     original = tvm.tir.PrimFunc(
         [],
         tvm.tir.Evaluate(0),
@@ -139,7 +139,7 @@ def test_compile_forwards_only_canonical_target_and_runtime(monkeypatch):
         return object()
 
     monkeypatch.setattr(jit_api, "cached", fake_cached)
-    target = _tpu_target("sg2260e", "rv")
+    target = _tpu_target("bm1690e", "rv")
     jit_api.compile(
         func=object(),
         target=target,
@@ -161,7 +161,7 @@ def test_jit_forwards_explicit_tpu_runtime_mode(monkeypatch):
     monkeypatch.setattr(jit_api, "compile", fake_compile)
     result = jit_api.jit(
         func=object(),
-        target=_tpu_target("sg2260e", "rv"),
+        target=_tpu_target("bm1690e", "rv"),
         runtime_mode="pcie",
     )
 
@@ -174,14 +174,14 @@ def test_tpu_target_kind_registration_matches_backend_contract():
     assert options["mcpu"] == "runtime.String"
     assert options["tpu-programming-model"] == "runtime.String"
 
-    target = tvm.target.Target(_tpu_target("sg2260e", "rv"))
+    target = tvm.target.Target(_tpu_target("bm1690e", "rv"))
     assert "tpu" in target.keys
 
 
 def test_tpu_chip_capabilities_are_explicit_and_fail_closed():
-    sg = get_tpu_chip_spec("SG2260E")
+    sg = get_tpu_chip_spec("BM1690E")
     assert sg.ppl_arch == "tpub_7_1_e"
-    assert sg.ppl_compile_definitions == ("__tpub_7_1_e__", "__sg2260e__")
+    assert sg.ppl_compile_definitions == ("__tpub_7_1_e__", "__bm1690e__")
     assert sg.physical_core_count == 4
     assert sg.programming_models == ("tpukernel", "rv")
 
@@ -194,14 +194,14 @@ def test_tpu_chip_capabilities_are_explicit_and_fail_closed():
     with pytest.raises(ValueError, match="does not support programming model"):
         TPUTargetSpec("bm1690", "rv")
     with pytest.raises(ValueError, match="Unsupported TPU chip"):
-        TPUTargetSpec("sg2260erv", "rv")
+        TPUTargetSpec("bm1690erv", "rv")
 
 
 @pytest.mark.parametrize("chip,programming_model,supported", [
     ("bm1690", "tpukernel", True),
     ("bm1690", "rv", False),
-    ("sg2260e", "tpukernel", True),
-    ("sg2260e", "rv", True),
+    ("bm1690e", "tpukernel", True),
+    ("bm1690e", "rv", True),
 ])
 def test_python_and_native_tpu_capability_boundaries_share_one_matrix(chip, programming_model,
                                                                       supported):
@@ -225,7 +225,7 @@ def test_python_and_native_tpu_capability_boundaries_share_one_matrix(chip, prog
 
 def test_address_assignment_rejects_a_different_bound_tpu_identity():
     function_target = tvm.target.Target(_tpu_target("bm1690", "tpukernel"))
-    requested_target = tvm.target.Target(_tpu_target("sg2260e", "tpukernel"))
+    requested_target = tvm.target.Target(_tpu_target("bm1690e", "tpukernel"))
     prim_func = tvm.tir.PrimFunc(
         [],
         tvm.tir.Evaluate(0),
@@ -237,14 +237,14 @@ def test_address_assignment_rejects_a_different_bound_tpu_identity():
 
 
 def test_target_and_runtime_are_resolved_as_independent_identities():
-    target = tvm.target.Target(_tpu_target("sg2260e", "rv"))
-    assert resolve_tpu_target(target=target) == TPUTargetSpec("sg2260e", "rv")
+    target = tvm.target.Target(_tpu_target("bm1690e", "rv"))
+    assert resolve_tpu_target(target=target) == TPUTargetSpec("bm1690e", "rv")
     assert resolve_tpu_runtime(runtime_mode=None) == TPURuntimeConfig("cmodel")
     assert resolve_tpu_runtime(runtime_mode="pcie") == TPURuntimeConfig("pcie")
 
 
 def test_tpu_target_uses_a_backend_specific_dispatch_key():
-    target = tvm.target.Target(_tpu_target("sg2260e", "rv"))
+    target = tvm.target.Target(_tpu_target("bm1690e", "rv"))
 
     assert [str(key) for key in target.keys] == ["tpu"]
     assert "cpu" not in [str(key) for key in target.keys]
@@ -254,30 +254,30 @@ def test_tpu_target_requires_both_canonical_compile_axes():
     with pytest.raises(ValueError, match="explicit physical chip"):
         resolve_tpu_target(target=tvm.target.Target("tpu -tpu-programming-model=tpukernel"))
     with pytest.raises(ValueError, match="explicit programming model"):
-        resolve_tpu_target(target=tvm.target.Target("tpu -mcpu=sg2260e"))
+        resolve_tpu_target(target=tvm.target.Target("tpu -mcpu=bm1690e"))
     with pytest.raises(ValueError, match="Unsupported TPU programming model"):
         resolve_tpu_target(
-            target=tvm.target.Target("tpu -mcpu=sg2260e -tpu-programming-model=legacy"))
+            target=tvm.target.Target("tpu -mcpu=bm1690e -tpu-programming-model=legacy"))
 
 
 def test_target_model_is_workload_metadata_not_a_chip_alias():
     target = tvm.target.Target({
         "kind": "tpu",
-        "mcpu": "sg2260e",
+        "mcpu": "bm1690e",
         "model": "matmul_smoke",
         "tpu-programming-model": "tpukernel",
     })
-    assert resolve_tpu_target(target=target) == TPUTargetSpec("sg2260e", "tpukernel")
+    assert resolve_tpu_target(target=target) == TPUTargetSpec("bm1690e", "tpukernel")
     assert target.model == "matmul_smoke"
 
 
 def test_native_and_python_target_boundaries_share_normalization():
     target = tvm.target.Target({
         "kind": "tpu",
-        "mcpu": " SG2260E ",
+        "mcpu": " BM1690E ",
         "tpu-programming-model": " tpukernel ",
     })
-    assert resolve_tpu_target(target=target) == TPUTargetSpec("sg2260e", "tpukernel")
+    assert resolve_tpu_target(target=target) == TPUTargetSpec("bm1690e", "tpukernel")
 
     prim_func = tvm.tir.PrimFunc(
         [],
@@ -285,18 +285,18 @@ def test_native_and_python_target_boundaries_share_normalization():
     ).with_attr("global_symbol", "normalized_target")
     source = tvm._ffi.get_global_func("target.build.tilelang_tpu")(tvm.IRModule(
         {"normalized_target": prim_func}), target)
-    assert "target: sg2260e, programming model: tpukernel" in source
+    assert "target: bm1690e, programming model: tpukernel" in source
 
 
 @pytest.mark.parametrize("function_target,build_target,message", [
     (
         _tpu_target("bm1690", "tpukernel"),
-        _tpu_target("sg2260e", "tpukernel"),
-        "PrimFunc chip bm1690 disagrees with build target chip sg2260e",
+        _tpu_target("bm1690e", "tpukernel"),
+        "PrimFunc chip bm1690 disagrees with build target chip bm1690e",
     ),
     (
-        _tpu_target("sg2260e", "rv"),
-        _tpu_target("sg2260e", "tpukernel"),
+        _tpu_target("bm1690e", "rv"),
+        _tpu_target("bm1690e", "tpukernel"),
         "PrimFunc programming model rv disagrees with build target",
     ),
 ])
@@ -424,7 +424,7 @@ def test_native_tpu_codegen_rejects_nonserial_loops_and_attributes():
         )
 
 
-@pytest.mark.parametrize("chip", ["bm1690", "sg2260e"])
+@pytest.mark.parametrize("chip", ["bm1690", "bm1690e"])
 def test_native_tpukernel_codegen_rejects_pure_rv_extern_bypass(chip):
     function = tvm.tir.PrimFunc(
         [],
@@ -479,7 +479,7 @@ def test_tpu_chip_capability_registry_is_read_only():
 
 def test_tpu_persistent_cache_save_and_load_are_disabled_without_a_manifest():
     cache = KernelCache()
-    target = _tpu_target("sg2260e", "tpukernel")
+    target = _tpu_target("bm1690e", "tpukernel")
     tpu_kernel = SimpleNamespace(target=tvm.target.Target(target))
 
     with pytest.raises(RuntimeError, match="manifest"):
@@ -490,13 +490,13 @@ def test_tpu_persistent_cache_save_and_load_are_disabled_without_a_manifest():
 
 def test_jit_kernel_resolves_canonical_tpu_identities_without_compiling():
     kernel = JITKernel(
-        target=_tpu_target("sg2260e", "rv"),
+        target=_tpu_target("bm1690e", "rv"),
         execution_backend="ctypes",
         from_database=True,
         runtime_mode="cmodel",
     )
 
-    assert kernel.tpu_target == TPUTargetSpec("sg2260e", "rv")
+    assert kernel.tpu_target == TPUTargetSpec("bm1690e", "rv")
     assert kernel.tpu_runtime == TPURuntimeConfig("cmodel")
 
 
@@ -509,7 +509,7 @@ def test_tpu_jit_rejects_dlpack_before_lowering(monkeypatch):
     with pytest.raises(ValueError, match=r"TPU targets do not support execution_backend='dlpack'"):
         JITKernel(
             func=object(),
-            target=_tpu_target("sg2260e", "rv"),
+            target=_tpu_target("bm1690e", "rv"),
             execution_backend="dlpack",
             runtime_mode="cmodel",
         )
@@ -580,8 +580,8 @@ def test_tpu_externs_cannot_silently_lower_after_auto_selects_c(monkeypatch):
 
 
 def test_library_generator_receives_target_and_runtime_identities():
-    target = tvm.target.Target(_tpu_target("sg2260e", "rv"))
-    target_spec = TPUTargetSpec("sg2260e", "rv")
+    target = tvm.target.Target(_tpu_target("bm1690e", "rv"))
+    target_spec = TPUTargetSpec("bm1690e", "rv")
     runtime_config = TPURuntimeConfig("pcie")
     generator = LibraryGenerator(
         target,
@@ -611,7 +611,7 @@ def test_database_adapter_forwards_target_and_runtime_identities(monkeypatch, ba
             return object()
 
     monkeypatch.setattr(kernel_module, adapter_name, FakeAdapter)
-    target = _tpu_target("sg2260e", "rv")
+    target = _tpu_target("bm1690e", "rv")
     kernel = JITKernel(
         target=target,
         execution_backend=backend,
@@ -629,5 +629,5 @@ def test_database_adapter_forwards_target_and_runtime_identities(monkeypatch, ba
     )
 
     assert adapter is not None
-    assert captured["tpu_target"] == TPUTargetSpec("sg2260e", "rv")
+    assert captured["tpu_target"] == TPUTargetSpec("bm1690e", "rv")
     assert captured["tpu_runtime"] == TPURuntimeConfig("cmodel")

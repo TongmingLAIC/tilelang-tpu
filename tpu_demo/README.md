@@ -37,7 +37,7 @@ The validated execution combinations are:
 | Target | TPU-Kernel CModel | TPU-Kernel PCIe | RV Tensor CModel | RV Tensor PCIe |
 | --- | --- | --- | --- | --- |
 | BM1690 | Yes | Not verified on this host | Not available | Not available |
-| SG2260E | Yes | Yes | Yes | Yes |
+| BM1690E | Yes | Yes | Yes | Yes |
 
 ## Kernel selection
 
@@ -124,14 +124,14 @@ python testing/python/jit/tpu_demo_ops_matrix.py \
   --programming-model rv
 ```
 
-Run one SG2260E RV CModel case:
+Run one BM1690E RV CModel case:
 
 ```bash
 python -m tilelang.jit.tpu_cmodel \
   --output-dir "$HOME/tmp/tilelang/demo-rv-$(date +%s%N)" -- \
   python -m tpu_demo.run \
   --case matmul.float16 \
-  --chip sg2260e \
+  --chip bm1690e \
   --programming-model rv \
   --runtime-mode cmodel
 ```
@@ -182,7 +182,7 @@ runner is `tpu_demo_ops_matrix.py`.
 ## CModel and PCIe validation
 
 Use a fresh output directory for every run. Validate BM1690 CModel first and
-then SG2260E CModel:
+then BM1690E CModel:
 
 ```bash
 export TILELANG_TPU_DEMO_RUN="research/artifacts/demo-run"
@@ -195,24 +195,24 @@ python testing/python/jit/tpu_demo_ops_matrix.py \
 
 python testing/python/jit/tpu_demo_ops_matrix.py \
   --runtime-mode cmodel \
-  --chip sg2260e \
-  --output-dir "${TILELANG_TPU_DEMO_RUN}/sg2260e-cmodel"
+  --chip bm1690e \
+  --output-dir "${TILELANG_TPU_DEMO_RUN}/bm1690e-cmodel"
 ```
 
-The SG2260E command runs TPU-Kernel and RV Tensor serially. Start PCIe only
+The BM1690E command runs TPU-Kernel and RV Tensor serially. Start PCIe only
 after both CModel stages pass:
 
 ```bash
 python testing/python/jit/tpu_demo_ops_matrix.py \
   --runtime-mode pcie \
-  --chip sg2260e \
+  --chip bm1690e \
   --device-id 0 \
   --allow-pcie \
   --allow-pcie-profile \
   --all-pcie-cases \
   --bm-cmodel-summary "${TILELANG_TPU_DEMO_RUN}/bm1690-cmodel/summary.json" \
-  --sg-cmodel-summary "${TILELANG_TPU_DEMO_RUN}/sg2260e-cmodel/summary.json" \
-  --output-dir "${TILELANG_TPU_DEMO_RUN}/sg2260e-pcie"
+  --sg-cmodel-summary "${TILELANG_TPU_DEMO_RUN}/bm1690e-cmodel/summary.json" \
+  --output-dir "${TILELANG_TPU_DEMO_RUN}/bm1690e-pcie"
 ```
 
 The PCIe runner takes an exclusive device lock, checks board state before and

@@ -31,6 +31,8 @@ def _make_ppl_17_layout(tmp_path, chip="bm1690", arch="tpub_7_1"):
     _touch(tmp_path / f"deps/chip/{arch}/lib/libtpuv7_emulator.so")
     _touch(tmp_path / f"deps/chip/{arch}/lib/libfirmware_core.a")
     _touch(tmp_path / f"deps/chip/{arch}/lib/libtpudnn.so")
+    (tmp_path / f"deps/chip/{arch}/config_common.cmake").write_text(
+        f"add_definitions(-D__{chip}__)\n", encoding="utf-8")
 
 
 def test_resolve_ppl_17_layout(tmp_path):
@@ -41,7 +43,7 @@ def test_resolve_ppl_17_layout(tmp_path):
 
     assert layout.arch == arch
     assert layout.physical_core_count == 8
-    assert layout.compile_definitions == ("__tpub_7_1__", "__sg2260__")
+    assert layout.compile_definitions == ("__tpub_7_1__", "__sg2260__", "__bm1690__")
     assert layout.firmware_archive == (tmp_path / f"deps/chip/{arch}/lib/libfirmware_core.a")
     assert layout.tpudnn_include == (tmp_path / f"deps/chip/{arch}/TPU1686/tpuDNN/include")
     assert layout.tpudnn_library == (tmp_path / f"deps/chip/{arch}/lib/libtpudnn.so")
@@ -53,21 +55,44 @@ def test_resolve_ppl_17_layout(tmp_path):
     )
 
 
-def test_resolve_sg2260e_core_count(tmp_path):
+def test_resolve_bm1690e_core_count(tmp_path):
     arch = "tpub_7_1_e"
-    _make_ppl_17_layout(tmp_path, chip="sg2260e", arch=arch)
+    _make_ppl_17_layout(tmp_path, chip="bm1690e", arch=arch)
 
-    layout = resolve_ppl_layout(str(tmp_path), "sg2260e")
+    layout = resolve_ppl_layout(str(tmp_path), "bm1690e")
 
     assert layout.arch == arch
     assert layout.physical_core_count == 4
-    assert layout.compile_definitions == ("__tpub_7_1_e__", "__sg2260e__")
+    assert layout.compile_definitions == ("__tpub_7_1_e__", "__bm1690e__")
+
+
+def test_vendor_macros_come_from_the_sdk_without_changing_target_identity(tmp_path):
+    arch = "tpub_7_1_e"
+    _make_ppl_17_layout(tmp_path, chip="bm1690e", arch=arch)
+    configuration = tmp_path / f"deps/chip/{arch}/config_common.cmake"
+    configuration.write_text("add_definitions(-D__vendor_device_e__)\n", encoding="utf-8")
+
+    layout = resolve_ppl_layout(str(tmp_path), "BM1690E")
+
+    assert layout.chip == "bm1690e"
+    assert layout.compile_definitions == (
+        "__tpub_7_1_e__", "__bm1690e__", "__vendor_device_e__")
+    configuration.write_text("add_definitions(-D__replacement_vendor_macro__)\n", encoding="utf-8")
+    assert layout.compile_definitions[-1] == "__replacement_vendor_macro__"
+
+
+def test_unsupported_sdk_compile_flags_are_rejected(tmp_path):
+    _make_ppl_17_layout(tmp_path)
+    configuration = tmp_path / "deps/chip/tpub_7_1/config_common.cmake"
+    configuration.write_text("add_definitions(-include unexpected.h)\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Unsupported PPL compile definition"):
+        _ = resolve_ppl_layout(str(tmp_path), "bm1690").compile_definitions
 
 
 def test_rvt_api_is_required_for_rv_mode(tmp_path):
     arch = "tpub_7_1_e"
-    _make_ppl_17_layout(tmp_path, chip="sg2260e", arch=arch)
-    layout = resolve_ppl_layout(str(tmp_path), "sg2260e")
+    _make_ppl_17_layout(tmp_path, chip="bm1690e", arch=arch)
+    layout = resolve_ppl_layout(str(tmp_path), "bm1690e")
 
     with pytest.raises(FileNotFoundError, match="rvt_api.h"):
         layout.require_rvt_api()
@@ -156,24 +181,24 @@ def test_only_pcie_profiling_requires_tpudnn(tmp_path, monkeypatch):
 def test_rejects_unknown_chip_in_ppl_17_layout(tmp_path):
     _make_ppl_17_layout(tmp_path)
 
-    with pytest.raises(ValueError, match="sg2260e"):
-        resolve_ppl_layout(str(tmp_path), "sg2260e")
+    with pytest.raises(ValueError, match="bm1690e"):
+        resolve_ppl_layout(str(tmp_path), "bm1690e")
 
 
 def test_rejects_chip_map_that_disagrees_with_the_capability_registry(tmp_path):
-    _make_ppl_17_layout(tmp_path, chip="sg2260e", arch="tpub_7_1")
+    _make_ppl_17_layout(tmp_path, chip="bm1690e", arch="tpub_7_1")
 
     with pytest.raises(ValueError, match="disagrees with TileLang's validated capability"):
-        resolve_ppl_layout(str(tmp_path), "sg2260e")
+        resolve_ppl_layout(str(tmp_path), "bm1690e")
 
 
 def test_pcie_cross_compiler_is_discovered_without_a_pinned_sdk_version(tmp_path):
-    _make_ppl_17_layout(tmp_path, chip="sg2260e", arch="tpub_7_1_e")
+    _make_ppl_17_layout(tmp_path, chip="bm1690e", arch="tpub_7_1_e")
     gcc = tmp_path / ("third_party/toolchains_dir/any-ppl-release/bin/"
                       "riscv64-unknown-linux-gnu-gcc")
     _touch(gcc)
 
-    layout = resolve_ppl_layout(str(tmp_path), "sg2260e")
+    layout = resolve_ppl_layout(str(tmp_path), "bm1690e")
     assert layout.pcie_cross_gcc() == gcc
 
 

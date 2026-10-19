@@ -106,7 +106,7 @@ def test_tree_identity_rejects_special_entries(tmp_path):
 
 def _fake_toolchain(tmp_path: Path):
     root = tmp_path / "ppl"
-    _write(root / "deps/chip/chip_map.json", b'{"bm1690":"bm","sg2260e":"sg"}')
+    _write(root / "deps/chip/chip_map.json", b'{"bm1690":"bm","bm1690e":"sg"}')
     common = root / "deps/common"
     runtime = root / "deps/runtime/tpuv7-runtime/lib"
     helper = _write(common / "dev/utils/src/ppl_helper.c", b"helper")
@@ -131,8 +131,9 @@ def _fake_toolchain(tmp_path: Path):
     tpu_smi = _write(tmp_path / "installed/bin/tpu-smi", b"smi", executable=True)
 
     layouts = {}
-    for chip, arch, cores in (("bm1690", "bm", 8), ("sg2260e", "sg", 4)):
+    for chip, arch, cores in (("bm1690", "bm", 8), ("bm1690e", "sg", 4)):
         chip_root = root / "deps/chip" / arch
+        _write(chip_root / "config_common.cmake", f"add_definitions(-DARCH_{arch.upper()})\n".encode())
         kernel_include = chip_root / "TPU1686/kernel/include"
         backend = chip_root / "lib"
         tpudnn_include = chip_root / "TPU1686/tpuDNN/include"
@@ -209,7 +210,7 @@ def test_capture_cmodel_identity_covers_loaded_libraries_and_both_chips(tmp_path
     second = _capture(fake, "cmodel")
 
     assert first == second
-    assert set(first["chips"]) == {"bm1690", "sg2260e"}
+    assert set(first["chips"]) == {"bm1690", "bm1690e"}
     assert first["compiler_runtime"]["tilelang_library"]["sha256"]
     assert first["compiler_runtime"]["tvm_library"]["sha256"]
     assert first["ppl_common"]["ppl_helper"]["sha256"]
@@ -228,7 +229,7 @@ def test_capture_pcie_identity_covers_cross_toolchain_firmware_tpudnn_runtime_an
     assert first["pcie"]["cross_toolchain_tree"]["file_count"] == 3
     assert first["pcie"]["installed_runtime_library"]["sha256"]
     assert first["pcie"]["tpu_smi"]["sha256"]
-    for chip in ("bm1690", "sg2260e"):
+    for chip in ("bm1690", "bm1690e"):
         assert first["pcie"]["chips"][chip]["firmware_archive"]["sha256"]
         assert first["pcie"]["chips"][chip]["tpudnn_library"]["sha256"]
 
@@ -236,6 +237,20 @@ def test_capture_pcie_identity_covers_cross_toolchain_firmware_tpudnn_runtime_an
     second = _capture(fake, "pcie")
     assert (second["pcie"]["cross_toolchain_tree"]["sha256"]
             != first["pcie"]["cross_toolchain_tree"]["sha256"])
+
+
+def test_capture_identity_covers_sdk_compile_configuration(tmp_path, monkeypatch):
+    fake = _fake_toolchain(tmp_path)
+    monkeypatch.setattr(identity_module, "resolve_ppl_layout",
+                        lambda _root, chip: fake.layouts[chip])
+    first = _capture(fake, "cmodel")
+    configuration = fake.root / "deps/chip/sg/config_common.cmake"
+    configuration.write_text("add_definitions(-DUPDATED_VENDOR_MACRO)\n")
+
+    second = _capture(fake, "cmodel")
+
+    assert (first["chips"]["bm1690e"]["compile_configuration"]["sha256"]
+            != second["chips"]["bm1690e"]["compile_configuration"]["sha256"])
 
 
 def test_capture_rejects_a_component_changed_after_its_own_hash(tmp_path, monkeypatch):

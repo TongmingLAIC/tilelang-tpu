@@ -23,8 +23,8 @@ import traceback
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 import zlib
 
-_CHIPS = ("sg2260e", "bm1690")
-_CORE_COUNTS = {"sg2260e": 4, "bm1690": 8}
+_CHIPS = ("bm1690e", "bm1690")
+_CORE_COUNTS = {"bm1690e": 4, "bm1690": 8}
 _RUNTIME_MODES = ("cmodel", "pcie")
 _FLOAT_DTYPES = ("float16", "bfloat16", "float32")
 _REDUCTION_WIDTHS = (15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65)
@@ -133,7 +133,7 @@ def build_case_specs() -> Tuple[CaseSpec, ...]:
         add("gemm", dtype, "overwrite", accumulate=False, transpose_b=False)
         add("gemm", dtype, "accumulate", accumulate=True, transpose_b=False)
         add("gemm", dtype, "transpose-b", accumulate=False, transpose_b=True)
-    # BM1690 and SG2260E both expose the native FP32 matrix path.  Keep its
+    # BM1690 and BM1690E both expose the native FP32 matrix path.  Keep its
     # storage contract distinct because these operands use local.matrix rather
     # than the lane-distributed local layout used by lower-precision GEMM.
     add("gemm", "float32", "overwrite", accumulate=False, transpose_b=False)
@@ -167,7 +167,7 @@ def build_case_specs() -> Tuple[CaseSpec, ...]:
     for dtype in _FLOAT_DTYPES:
         add("gather", dtype)
 
-    # The SG2260E PPL 1.7 CModel terminates inside this HAU primitive.  Keep
+    # The BM1690E PPL 1.7 CModel terminates inside this HAU primitive.  Keep
     # the probes in the shared registry but schedule them only for BM1690.
     add("topk", "float32", "descending", supported_chips=("bm1690",), descended=True)
     add("topk", "float32", "ascending", supported_chips=("bm1690",), descended=False)

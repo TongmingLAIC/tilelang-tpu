@@ -58,13 +58,13 @@ inline std::string TargetStringOrEmpty(const Optional<String> &value) {
 }
 
 inline bool IsSupportedChip(const std::string &chip) {
-  return chip == "bm1690" || chip == "sg2260e";
+  return chip == "bm1690" || chip == "bm1690e";
 }
 
 inline bool SupportsProgrammingModel(const std::string &chip,
                                      const std::string &programming_model) {
   return programming_model == "tpukernel" ||
-         (chip == "sg2260e" && programming_model == "rv");
+         (chip == "bm1690e" && programming_model == "rv");
 }
 
 inline TargetSelection ResolveTarget(const Target &target,
@@ -74,7 +74,7 @@ inline TargetSelection ResolveTarget(const Target &target,
       LowerASCII(TargetStringOrEmpty(target->GetAttr<String>("mcpu")));
   ICHECK(!chip.empty() && IsSupportedChip(chip))
       << boundary << " requires a supported target chip via "
-      << "tpu -mcpu=<bm1690|sg2260e>; got "
+      << "tpu -mcpu=<bm1690|bm1690e>; got "
       << (chip.empty() ? "no chip" : chip);
 
   const std::string programming_model =

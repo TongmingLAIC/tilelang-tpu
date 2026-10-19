@@ -16,7 +16,7 @@ from tilelang.language.copy import buffer_to_tile_region
 
 
 def _target(programming_model="tpukernel"):
-    chip = "sg2260e" if programming_model == "rv" else "bm1690"
+    chip = "bm1690e" if programming_model == "rv" else "bm1690"
     return f"tpu -mcpu={chip} -tpu-programming-model={programming_model}"
 
 

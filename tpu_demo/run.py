@@ -66,7 +66,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--case", choices=tuple(case.case_id for case in build_cases()), required=True)
-    parser.add_argument("--chip", choices=CHIPS, default="sg2260e")
+    parser.add_argument("--chip", choices=CHIPS, default="bm1690e")
     parser.add_argument("--programming-model", choices=PROGRAMMING_MODELS, default="tpukernel")
     parser.add_argument(
         "--runtime-mode",

@@ -1,6 +1,6 @@
 // clang-format off
 #pragma once
-#if !defined(__sg2260__) && !defined(__sg2260e__)
+#if !defined(__sg2260__) && !defined(__bm1690e__)
 #error "TPU chip macro is required; compile generated wrappers through PPLLayout/LibraryGenerator"
 #endif
 

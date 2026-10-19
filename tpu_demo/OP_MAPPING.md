@@ -2,8 +2,8 @@
 
 This document defines the public `T.ppl_*` operation contract for the
 TPU-Kernel and RV Tensor programming models. The support entries below are
-based on numerical CModel validation on BM1690 and SG2260E, followed by
-SG2260E PCIe validation where that programming model is available.
+based on numerical CModel validation on BM1690 and BM1690E, followed by
+BM1690E PCIe validation where that programming model is available.
 
 The floating-point names used here are E4M3 (`e4m3_float8`), E5M2
 (`e5m2_float8`), FP16 (`float16`), BF16 (`bfloat16`), and FP32 (`float32`).
@@ -98,7 +98,7 @@ for rows containing NaNs are unspecified.
 | `ppl_topk` | `tpu_hau_sort_natural_index` on BM1690 | Not exposed | FP32, INT32, or UINT32 values; INT32 index output |
 
 `ppl_gather` and `ppl_topk` are explicit TPU-Kernel operations.
-`ppl_embedding` is the portable row-lookup semantic. The current SG2260E
+`ppl_embedding` is the portable row-lookup semantic. The current BM1690E
 runtime rejects `tpu_hau_sort_natural_index`, so `ppl_topk` is limited to
 BM1690 and is diagnosed during target lowering.
 

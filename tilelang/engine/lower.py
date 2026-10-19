@@ -321,7 +321,7 @@ def _reject_tpu_externs_for_non_tpu_target(mod: tvm.IRModule, target: Target) ->
         return
     rendered = ", ".join(f"{func}: {name} ({model})" for func, name, model in externs)
     raise ValueError(f"TPU externs cannot lower for target={target.kind.name!r}: {rendered}. "
-                     "Use a complete TPU target such as 'tpu -mcpu=sg2260e "
+                     "Use a complete TPU target such as 'tpu -mcpu=bm1690e "
                      "-tpu-programming-model=rv'. Portable tl.tpu.* calls select their "
                      "backend through the Target; explicit tl.tpukernel.* and raw rvt_* "
                      "calls must match that programming model.")
@@ -377,11 +377,11 @@ def _validate_tpu_residual_ir(mod: tvm.IRModule, target: Target, tpu_config) -> 
                for name in externs_by_model.get("tpukernel", ())):
             _validate_tpukernel_parallel_structure(function.body, target, function_name)
 
-        if (tpu_config.chip == "sg2260e" and
+        if (tpu_config.chip == "bm1690e" and
                 "tl.tpukernel.topk" in externs_by_model.get("tpukernel", ())):
             raise _tpu_contract_error(
                 target, function_name, "target-capability",
-                "tl.tpukernel.topk is unavailable on SG2260E: the PPL 1.7 "
+                "tl.tpukernel.topk is unavailable on BM1690E: the PPL 1.7 "
                 "tpub_7_1_e runtime rejects tpu_hau_sort_natural_index")
 
         for parameter in function.params:

@@ -1,7 +1,7 @@
 # Installing TileLang-TPU
 
 This guide installs TileLang-TPU from source on an x86_64 Linux host. CModel
-execution does not require a TPU card. SG2260E PCIe execution requires the
+execution does not require a TPU card. BM1690E PCIe execution requires the
 TPUv7 driver and runtime supplied with the card.
 
 ## Requirements
@@ -12,7 +12,7 @@ TPUv7 driver and runtime supplied with the card.
 | Python | Python 3.8 or later; Python 3.10 is recommended |
 | Build tools | CMake 3.26 or later and a C++17 compiler |
 | TPU SDK | SOPHGO PPL 1.7.122 development package |
-| PCIe runtime | TPUv7 driver and runtime for SG2260E |
+| PCIe runtime | TPUv7 driver and runtime for BM1690E |
 
 ## 1. Install system packages
 
@@ -91,7 +91,7 @@ from pathlib import Path
 chip_map_path = Path(os.environ["PPL_PROJECT_ROOT"]) / "deps/chip/chip_map.json"
 chip_map = json.loads(chip_map_path.read_text(encoding="utf-8"))
 print(f"BM1690:  {chip_map['bm1690']}")
-print(f"SG2260E: {chip_map['sg2260e']}")
+print(f"BM1690E: {chip_map['bm1690e']}")
 PY
 ```
 
@@ -99,7 +99,7 @@ The output should be:
 
 ```text
 BM1690:  tpub_7_1
-SG2260E: tpub_7_1_e
+BM1690E: tpub_7_1_e
 ```
 
 TileLang-TPU reads headers, libraries, CModel files, firmware, and the PCIe
@@ -147,10 +147,10 @@ import os
 from tilelang.jit.adapter.ppl_layout import resolve_ppl_layout
 
 root = os.environ["PPL_PROJECT_ROOT"]
-for chip in ("bm1690", "sg2260e"):
+for chip in ("bm1690", "bm1690e"):
     layout = resolve_ppl_layout(root, chip)
     layout.require_runtime("cmodel")
-    if chip == "sg2260e":
+    if chip == "bm1690e":
         layout.require_rvt_api()
     print(f"{chip}: {layout.arch}, {layout.physical_core_count} cores")
 PY
@@ -160,7 +160,7 @@ Expected output:
 
 ```text
 bm1690: tpub_7_1, 8 cores
-sg2260e: tpub_7_1_e, 4 cores
+bm1690e: tpub_7_1_e, 4 cores
 ```
 
 Run one TPU-Kernel example and one RV Tensor example with CModel:
@@ -170,7 +170,7 @@ python -m tilelang.jit.tpu_cmodel \
   --output-dir "$HOME/tmp/tilelang/install-tpukernel-$(date +%s%N)" -- \
   python -m tpu_demo.run \
   --case elementwise-add.float16 \
-  --chip sg2260e \
+  --chip bm1690e \
   --programming-model tpukernel \
   --runtime-mode cmodel
 
@@ -178,7 +178,7 @@ python -m tilelang.jit.tpu_cmodel \
   --output-dir "$HOME/tmp/tilelang/install-rv-$(date +%s%N)" -- \
   python -m tpu_demo.run \
   --case matmul.float16 \
-  --chip sg2260e \
+  --chip bm1690e \
   --programming-model rv \
   --runtime-mode cmodel
 ```
@@ -192,9 +192,9 @@ under `~/tmp/tilelang` for each invocation. The result directory must not
 exist beforehand. This isolation requires Linux user namespaces and
 `bubblewrap`.
 
-## 7. Configure SG2260E PCIe execution
+## 7. Configure BM1690E PCIe execution
 
-Install the TPUv7 driver and runtime package supplied with the SG2260E card,
+Install the TPUv7 driver and runtime package supplied with the BM1690E card,
 then check the device and runtime library:
 
 ```bash
@@ -217,7 +217,7 @@ import os
 
 from tilelang.jit.adapter.ppl_layout import resolve_ppl_layout
 
-layout = resolve_ppl_layout(os.environ["PPL_PROJECT_ROOT"], "sg2260e")
+layout = resolve_ppl_layout(os.environ["PPL_PROJECT_ROOT"], "bm1690e")
 layout.require_runtime("pcie")
 print(f"Cross-compiler: {layout.pcie_cross_gcc()}")
 print(f"Firmware:       {layout.firmware_archive}")
@@ -234,7 +234,7 @@ import os
 
 from tilelang.jit.adapter.ppl_layout import resolve_ppl_layout
 
-layout = resolve_ppl_layout(os.environ["PPL_PROJECT_ROOT"], "sg2260e")
+layout = resolve_ppl_layout(os.environ["PPL_PROJECT_ROOT"], "bm1690e")
 layout.require_profiling("pcie")
 print("PCIe profiling is ready")
 PY

@@ -10,7 +10,7 @@ import tilelang.language as T
 from tilelang.language.copy import buffer_to_tile_region
 
 
-def _target(chip="sg2260e"):
+def _target(chip="bm1690e"):
     return f"tpu -mcpu={chip} -tpu-programming-model=tpukernel"
 
 
@@ -18,7 +18,7 @@ def _target(chip="sg2260e"):
     ("dtype", "dtype_token"),
     (("float16", "DT_FP16"), ("bfloat16", "DT_BFP16"), ("float32", "DT_FP32")),
 )
-@pytest.mark.parametrize("chip", ("bm1690", "sg2260e"))
+@pytest.mark.parametrize("chip", ("bm1690", "bm1690e"))
 def test_rsqrt_selects_the_generic_instruction_for_all_declared_dtypes(chip, dtype, dtype_token):
 
     @T.prim_func
@@ -114,7 +114,7 @@ def test_transposed_gemm_accumulation_is_selected_by_programming_model(dtype, dt
 
     rv_source = tilelang.lower(
         kernel,
-        target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
+        target="tpu -mcpu=bm1690e -tpu-programming-model=rv",
         runtime_mode="cmodel",
     ).kernel_source
     assert rv_source.count("rvt_fmm2a_nt(10, 8, 9, 0, 0, 0);") == 1
@@ -130,7 +130,7 @@ def test_transposed_gemm_accumulation_is_selected_by_programming_model(dtype, dt
 @pytest.mark.parametrize(
     ("chip", "programming_model", "instruction"),
     (("bm1690", "tpukernel", "tpu_bdc_fp32_mm_L_trans("),
-     ("sg2260e", "tpukernel", "tpu_bdc_fp32_mm_L_trans("), ("sg2260e", "rv", "rvt_fmm_tn(")),
+     ("bm1690e", "tpukernel", "tpu_bdc_fp32_mm_L_trans("), ("bm1690e", "rv", "rvt_fmm_tn(")),
 )
 def test_fp32_transpose_a_gemm_selects_native_instruction(chip, programming_model, instruction,
                                                           accumulate):
@@ -185,7 +185,7 @@ def test_rv_native_gemm_cannot_bypass_fp32_accumulator_contract():
             tvm.error.TVMError, match="accumulating and FP8 fmm2 forms require an FP32 C tile"):
         tilelang.lower(
             kernel,
-            target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
+            target="tpu -mcpu=bm1690e -tpu-programming-model=rv",
             runtime_mode="cmodel",
         )
 
@@ -206,8 +206,8 @@ def test_invalid_elementwise_broadcast_fails_at_frontend():
     ("chip", "programming_model", "instruction"),
     (
         ("bm1690", "tpukernel", "tpu_bdc_max("),
-        ("sg2260e", "tpukernel", "tpu_bdc_max("),
-        ("sg2260e", "rv", "rvt_fmax(10, 8, 9);"),
+        ("bm1690e", "tpukernel", "tpu_bdc_max("),
+        ("bm1690e", "rv", "rvt_fmax(10, 8, 9);"),
     ),
 )
 @pytest.mark.parametrize("dtype", ("float16", "bfloat16", "float32"))
@@ -261,7 +261,7 @@ def test_rv_w_broadcast_uses_a_zero_stride_descriptor(operation, instruction):
 
     source = tilelang.lower(
         kernel,
-        target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
+        target="tpu -mcpu=bm1690e -tpu-programming-model=rv",
         runtime_mode="cmodel",
     ).kernel_source
     assert f"{instruction}(10, 8, 9);" in source
@@ -271,7 +271,7 @@ def test_rv_w_broadcast_uses_a_zero_stride_descriptor(operation, instruction):
     assert descriptor.rstrip().endswith(".stride.h, 0});")
 
 
-@pytest.mark.parametrize("chip", ("bm1690", "sg2260e"))
+@pytest.mark.parametrize("chip", ("bm1690", "bm1690e"))
 @pytest.mark.parametrize(
     ("dtype", "dtype_token"),
     (("e4m3_float8", "DT_FP8E4M3"), ("e5m2_float8", "DT_FP8E5M2")),
@@ -323,7 +323,7 @@ def test_rv_fp8_elementwise_selects_declared_instruction(dtype, dtype_token, ope
 
     source = tilelang.lower(
         kernel,
-        target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
+        target="tpu -mcpu=bm1690e -tpu-programming-model=rv",
         runtime_mode="cmodel",
     ).kernel_source
     assert f"{instruction}(10, 8, 9);" in source
@@ -455,7 +455,7 @@ def test_invalid_copy_operand_fails_with_a_frontend_diagnostic():
                 T.ppl_copy(T.float32(1), dst)
 
 
-@pytest.mark.parametrize("chip", ("bm1690", "sg2260e"))
+@pytest.mark.parametrize("chip", ("bm1690", "bm1690e"))
 def test_rank4_singleton_slice_roundtrips_through_rank2_local_tile(chip):
 
     @T.prim_func
@@ -503,8 +503,8 @@ def test_unvalidated_fp8_operations_fail_at_frontend(operation):
     ("chip", "programming_model", "instruction"),
     (
         ("bm1690", "tpukernel", "tpu_bdc_fp_max_pool2d("),
-        ("sg2260e", "tpukernel", "tpu_bdc_fp_max_pool2d("),
-        ("sg2260e", "rv", "rvt_pool_fmax(10, 8);"),
+        ("bm1690e", "tpukernel", "tpu_bdc_fp_max_pool2d("),
+        ("bm1690e", "rv", "rvt_pool_fmax(10, 8);"),
     ),
 )
 @pytest.mark.parametrize("dtype", ("e4m3_float8", "e5m2_float8"))
@@ -539,7 +539,7 @@ def test_rv_reduction_selects_validated_instruction_sequence(reduction, dtype, w
 
     source = tilelang.lower(
         kernel,
-        target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
+        target="tpu -mcpu=bm1690e -tpu-programming-model=rv",
         runtime_mode="cmodel",
     ).kernel_source
     low_precision_sum = reduction is T.ppl_reduce_sum and dtype != "float32"
@@ -571,7 +571,7 @@ def test_fp8_reduce_sum_is_rejected_until_wide_pooling_is_supported(dtype):
             T.ppl_reduce_sum(source, output, dim=1)
 
     for target in (
-        "tpu -mcpu=sg2260e -tpu-programming-model=rv",
+        "tpu -mcpu=bm1690e -tpu-programming-model=rv",
         _target("bm1690"),
     ):
         with pytest.raises(tvm.error.TVMError, match="does not support FP8"):
@@ -592,7 +592,7 @@ def test_nonzero_fp8_fill_reaches_each_backend(programming_model, instruction):
 
     source = tilelang.lower(
         kernel,
-        target=f"tpu -mcpu=sg2260e -tpu-programming-model={programming_model}",
+        target=f"tpu -mcpu=bm1690e -tpu-programming-model={programming_model}",
         runtime_mode="cmodel",
     ).kernel_source
     assert instruction in source
@@ -608,8 +608,8 @@ def test_nonzero_fp8_fill_reaches_each_backend(programming_model, instruction):
     ("chip", "programming_model", "instruction"),
     (
         ("bm1690", "tpukernel", "tpu_bdc_cast("),
-        ("sg2260e", "tpukernel", "tpu_bdc_cast("),
-        ("sg2260e", "rv", "rvt_cvt_f2f(9, 8);"),
+        ("bm1690e", "tpukernel", "tpu_bdc_cast("),
+        ("bm1690e", "rv", "rvt_cvt_f2f(9, 8);"),
     ),
 )
 def test_fp16_bf16_copy_conversion_selects_validated_backend(source_dtype, destination_dtype, chip,

@@ -98,7 +98,7 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
             # TileLang GPU programs cannot be assumed to be portable C programs.
             raise ValueError("No CUDA or HIP target is available. Select 'c' explicitly for "
                              "portable C code, or provide a complete TPU target such as "
-                             "'tpu -mcpu=sg2260e -tpu-programming-model=rv'.")
+                             "'tpu -mcpu=bm1690e -tpu-programming-model=rv'.")
     else:
         # Validate the target if it's not "auto"
         if not (isinstance(target, Target) or target in AVAILABLE_TARGETS or

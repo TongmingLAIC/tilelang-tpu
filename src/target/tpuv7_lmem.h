@@ -30,7 +30,7 @@
 
 namespace tvm {
 namespace tl {
-// BM1690 and SG2260E use this common TPUv7 local-memory layout.  Chip-specific
+// BM1690 and BM1690E use this common TPUv7 local-memory layout.  Chip-specific
 // differences (PPL SDK target, ISA capability, and physical core count) live
 // at the canonical Python/native target-capability boundaries, not in this
 // shared allocator geometry.

@@ -19,7 +19,7 @@ def digest(tensor):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--chip", choices=("bm1690", "sg2260e"), required=True)
+    parser.add_argument("--chip", choices=("bm1690", "bm1690e"), required=True)
     parser.add_argument("--m", type=int, required=True)
     parser.add_argument("--n", type=int, required=True)
     parser.add_argument("--k", type=int, required=True)
@@ -36,7 +36,7 @@ def main() -> int:
         parser.error("replay policy requires --replay-addresses, and other policies forbid it")
     if os.environ.get("TILELANG_CMODEL_PRIVATE_TMP") != "1":
         raise RuntimeError("CModel worker requires a private IPC namespace")
-    os.environ["TPU_RT_CORE_NUM"] = "4" if args.chip == "sg2260e" else "8"
+    os.environ["TPU_RT_CORE_NUM"] = "4" if args.chip == "bm1690e" else "8"
     if args.benchmark_runs < 0:
         parser.error("--benchmark-runs cannot be negative")
     os.environ["TILELANG_TPU_BENCHMARK_RUNS"] = str(args.benchmark_runs)

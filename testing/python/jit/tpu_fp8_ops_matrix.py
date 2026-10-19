@@ -3,7 +3,7 @@
 """Run the TPU-Kernel/RV FP8 capability matrix in supervised fresh processes.
 
 CModel remains the safe default. A PCIe run promotes matching, clean BM1690
-and SG2260E CModel evidence: it compiles a read-only Git snapshot, pins the
+and BM1690E CModel evidence: it compiles a read-only Git snapshot, pins the
 captured native compiler libraries, holds one exclusive device session,
 checks board health around every launch, and stops on the first failure.
 """
@@ -73,7 +73,7 @@ else:
         validate_profile_report as _validate_profile_report,
     )
 
-_CHIPS = ("sg2260e", "bm1690")
+_CHIPS = ("bm1690e", "bm1690")
 _MATRIX_KIND = "tpu_fp8_ops"
 _SCHEMA_VERSION = 1
 _WORKER_RESULT_PREFIX = "TPU_FP8_NUMERIC_RESULT="
@@ -158,8 +158,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         if (isinstance(args.device_id, bool) or not isinstance(args.device_id, int) or
                 args.device_id != 0):
             raise RuntimeError("this single-card validation host accepts only --device-id 0")
-        if args.chips != ["sg2260e"]:
-            raise RuntimeError("PCIe requires exactly one explicit --chip sg2260e")
+        if args.chips != ["bm1690e"]:
+            raise RuntimeError("PCIe requires exactly one explicit --chip bm1690e")
         if not args.cases and not args.all_pcie_cases:
             raise RuntimeError("PCIe requires an explicit --case or --all-pcie-cases")
         if args.bm_cmodel_summary is None or args.sg_cmodel_summary is None:
@@ -172,8 +172,8 @@ def _validate_args(args: argparse.Namespace) -> None:
             "PCIe acknowledgements, promotion, and decoder options are invalid for CModel")
     elif args.chips is None or len(args.chips) != 1:
         raise RuntimeError("CModel promotion requires exactly one explicit --chip")
-    if args.programming_model == "rv" and args.chips != ["sg2260e"]:
-        raise RuntimeError("RV Tensor FP8 validation requires exactly --chip sg2260e")
+    if args.programming_model == "rv" and args.chips != ["bm1690e"]:
+        raise RuntimeError("RV Tensor FP8 validation requires exactly --chip bm1690e")
     _selected_cases(args)
 
 
@@ -251,10 +251,10 @@ def _validate_pcie_promotion(
     current_toolchain: Mapping[str, Any],
     pcie_started_at: str,
 ) -> dict[str, Any]:
-    """Require matching BM1690 and SG2260E CModel FP8 evidence.
+    """Require matching BM1690 and BM1690E CModel FP8 evidence.
 
     BM1690 contributes TPU-Kernel evidence for cases shared by both programming
-    models.  RV-only cases still require passing SG2260E/RV evidence, but cannot
+    models.  RV-only cases still require passing BM1690E/RV evidence, but cannot
     require a nonexistent BM1690/RV result or an unsupported TPU-Kernel result.
     """
     assert args.bm_cmodel_summary is not None and args.sg_cmodel_summary is not None
@@ -278,12 +278,12 @@ def _validate_pcie_promotion(
         matrix_kind=_MATRIX_KIND,
         schema_version=_SCHEMA_VERSION,
         bm_allowed_scope=(("bm1690", "tpukernel"),),
-        sg_allowed_scope=(("sg2260e", "tpukernel"), ("sg2260e", "rv")),
+        sg_allowed_scope=(("bm1690e", "tpukernel"), ("bm1690e", "rv")),
         pcie_started_at=pcie_started_at,
     )
     for label, payload, expected_model in (
         ("BM1690", bm, "tpukernel"),
-        ("SG2260E", sg, args.programming_model),
+        ("BM1690E", sg, args.programming_model),
     ):
         if payload.get("git_commit") != commit:
             raise RuntimeError(f"{label} FP8 summary commit does not match current source")
@@ -301,7 +301,7 @@ def _validate_pcie_promotion(
                 raise RuntimeError(
                     f"{label} FP8 summary content identity for {field} does not match")
     if bm.get("git_commit") != sg.get("git_commit"):
-        raise RuntimeError("BM1690 and SG2260E FP8 summaries use different commits")
+        raise RuntimeError("BM1690 and BM1690E FP8 summaries use different commits")
 
     bm_results = bm.get("cases")
     sg_results = sg.get("cases")
@@ -311,7 +311,7 @@ def _validate_pcie_promotion(
     bm_cases = tuple(case for case in cases if case not in _UNSUPPORTED_CASES)
     for dtype in dtypes:
         for case in cases:
-            required_results = [(f"sg2260e/{args.programming_model}/{dtype}/{case}",
+            required_results = [(f"bm1690e/{args.programming_model}/{dtype}/{case}",
                                  sg_results, args.programming_model)]
             if case in bm_cases:
                 required_results.insert(
@@ -346,11 +346,11 @@ def _validate_pcie_promotion(
         "source_state_sha256": source_digest,
         "bm1690_summary": bm["_resolved_path"],
         "bm1690_summary_sha256": bm["_sha256"],
-        "sg2260e_summary": sg["_resolved_path"],
-        "sg2260e_summary_sha256": sg["_sha256"],
+        "bm1690e_summary": sg["_resolved_path"],
+        "bm1690e_summary_sha256": sg["_sha256"],
         "validated_case_count": len(dtypes) * len(cases),
         "bm1690_validated_case_count": len(dtypes) * len(bm_cases),
-        "sg2260e_validated_case_count": len(dtypes) * len(cases),
+        "bm1690e_validated_case_count": len(dtypes) * len(cases),
     }
 
 

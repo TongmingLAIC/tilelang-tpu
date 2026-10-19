@@ -85,7 +85,7 @@ def main():
     (out / "schema.json").write_text(json.dumps(schema, indent=2))
     request = dict(
         hardware={
-            "chip": "SG2260E",
+            "chip": "BM1690E",
             "lanes": 64,
             "local_bytes_per_lane": 262144,
             "banks_per_lane": 16,

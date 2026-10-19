@@ -15,7 +15,7 @@ import torch
 import tilelang
 import tilelang.language as T
 
-TARGET = "tpu -mcpu=sg2260e -tpu-programming-model=rv"
+TARGET = "tpu -mcpu=bm1690e -tpu-programming-model=rv"
 DTYPES = ("float16", "bfloat16", "float32")
 CASES = tuple(
     f"{op}.{dtype}" for op in ("fill", "scalar", "rsqrt", "sum", "max") for dtype in DTYPES) + (
@@ -128,7 +128,7 @@ def test_exp_family_rejects_unported_dtypes(op, dtype):
 def test_promoted_ops_retain_tpukernel_lowering(op):
     artifact = tilelang.lower(
         make_kernel(op, "float32", rows=4),
-        target="tpu -mcpu=sg2260e -tpu-programming-model=tpukernel")
+        target="tpu -mcpu=bm1690e -tpu-programming-model=tpukernel")
     assert "tpu_bdc_" in artifact.kernel_source
     assert "rvt_" not in artifact.kernel_source
 

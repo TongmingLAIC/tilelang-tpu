@@ -19,7 +19,7 @@ def _args(runtime_mode="cmodel", **overrides):
         "output_dir": Path("matrix-output"),
         "timeout": 10.0,
         "kill_grace": 1.0,
-        "chips": ("sg2260e",),
+        "chips": ("bm1690e",),
         "operations": ("add",) if runtime_mode == "pcie" else None,
         "dtypes": None,
         "case_ids": None,
@@ -70,9 +70,9 @@ def _toolchain_identity(runtime_mode):
                     "sha256": "bm1690"
                 }
             },
-            "sg2260e": {
+            "bm1690e": {
                 "kernel_include_tree": {
-                    "sha256": "sg2260e"
+                    "sha256": "bm1690e"
                 }
             },
         },
@@ -96,7 +96,7 @@ def _case(case_id="add.float16.dense"):
 
 @pytest.mark.parametrize(
     ("runtime_mode", "chip", "device_id"),
-    (("cmodel", "bm1690", None), ("pcie", "sg2260e", 0)),
+    (("cmodel", "bm1690", None), ("pcie", "bm1690e", 0)),
 )
 def test_direct_worker_environment_has_deterministic_host_tool_path(monkeypatch, tmp_path,
                                                                     runtime_mode, chip, device_id):
@@ -132,7 +132,7 @@ def test_validate_args_requires_scoped_promoted_single_device_pcie():
         }, "only --device-id 0"),
         ({
             "chips": ("bm1690",)
-        }, "only for explicit --chip sg2260e"),
+        }, "only for explicit --chip bm1690e"),
         ({
             "operations": None
         }, "explicit --op/--case subset"),
@@ -163,7 +163,7 @@ def test_validate_args_rejects_pcie_controls_in_cmodel():
         matrix._validate_args(_args(allow_pcie_load=True))
 
 
-@pytest.mark.parametrize("chips", (None, ("bm1690", "sg2260e")))
+@pytest.mark.parametrize("chips", (None, ("bm1690", "bm1690e")))
 def test_validate_args_requires_exactly_one_explicit_cmodel_chip(chips):
     with pytest.raises(RuntimeError, match="exactly one explicit --chip"):
         matrix._validate_args(_args(chips=chips))
@@ -174,24 +174,24 @@ def test_validate_numeric_identity_requires_exact_case_and_backend():
     payload = {
         "status": "passed",
         "case": matrix._json_normalized(case.to_json()),
-        "chip": "sg2260e",
+        "chip": "bm1690e",
         "programming_model": "tpukernel",
         "runtime_mode": "pcie",
         "metrics": {
             "passed": True
         },
     }
-    matrix._validate_numeric_identity(payload, case=case, chip="sg2260e", runtime_mode="pcie")
+    matrix._validate_numeric_identity(payload, case=case, chip="bm1690e", runtime_mode="pcie")
     payload["case"] = matrix._json_normalized(_case("sub.float16.dense").to_json())
     with pytest.raises(RuntimeError, match="wrong case"):
-        matrix._validate_numeric_identity(payload, case=case, chip="sg2260e", runtime_mode="pcie")
+        matrix._validate_numeric_identity(payload, case=case, chip="bm1690e", runtime_mode="pcie")
 
 
 def test_worker_payload_rejects_multiple_structured_markers():
     payload = {
         "status": "passed",
         "case": _case().to_json(),
-        "chip": "sg2260e",
+        "chip": "bm1690e",
         "programming_model": "tpukernel",
         "runtime_mode": "cmodel",
         "metrics": {},
@@ -262,7 +262,7 @@ def test_promotion_requires_matching_exact_bm_and_sg_results(monkeypatch, tmp_pa
     bm_path = tmp_path / "bm.json"
     sg_path = tmp_path / "sg.json"
     bm_path.write_text(json.dumps(_promotion_summary(case, "bm1690")))
-    sg_path.write_text(json.dumps(_promotion_summary(case, "sg2260e")))
+    sg_path.write_text(json.dumps(_promotion_summary(case, "bm1690e")))
     monkeypatch.setattr(matrix, "git_source_identity", lambda _root: _source_identity())
     args = _args("pcie", bm_cmodel_summary=bm_path, sg_cmodel_summary=sg_path)
 
@@ -275,7 +275,7 @@ def test_promotion_requires_matching_exact_bm_and_sg_results(monkeypatch, tmp_pa
     )
     assert evidence["validated_case_count"] == 1
 
-    broken = _promotion_summary(case, "sg2260e")
+    broken = _promotion_summary(case, "bm1690e")
     broken["results"][0]["case"] = matrix._json_normalized(_case("sub.float16.dense").to_json())
     sg_path.write_text(json.dumps(broken))
     with pytest.raises(RuntimeError, match="scheduled work does not match"):
@@ -359,7 +359,7 @@ def test_pcie_matrix_pins_snapshot_guards_each_case_and_checks_board(monkeypatch
         return result
 
     monkeypatch.setattr(matrix, "_run_one", run_one)
-    status = matrix._run_matrix(args, tmp_path, output_dir, ("sg2260e",), (case,), {
+    status = matrix._run_matrix(args, tmp_path, output_dir, ("bm1690e",), (case,), {
         "PPL_PROJECT_ROOT": "/sdk",
         "TMPDIR": str(scratch)
     })
@@ -443,7 +443,7 @@ def test_failed_postflight_is_not_retried(monkeypatch, tmp_path, interrupted, ex
 
     def invoke_matrix():
         return matrix._run_matrix(
-            _args("pcie"), tmp_path, output_dir, ("sg2260e",), (case,), {"TMPDIR": str(scratch)})
+            _args("pcie"), tmp_path, output_dir, ("bm1690e",), (case,), {"TMPDIR": str(scratch)})
 
     if interrupted:
         with pytest.raises(KeyboardInterrupt):
@@ -473,7 +473,7 @@ def test_pcie_worker_uses_fail_closed_supervisor_and_unsets_inherited_profile_co
     payload = {
         "status": "passed",
         "case": matrix._json_normalized(case.to_json()),
-        "chip": "sg2260e",
+        "chip": "bm1690e",
         "programming_model": "tpukernel",
         "runtime_mode": "pcie",
         "metrics": {
@@ -509,7 +509,7 @@ def test_pcie_worker_uses_fail_closed_supervisor_and_unsets_inherited_profile_co
         },
         tmp_path,
         Path("/snapshot/testing/python/jit/tpukernel_ops_worker.py"),
-        "sg2260e",
+        "bm1690e",
         case,
     )
 
@@ -526,7 +526,7 @@ def test_pcie_worker_uses_fail_closed_supervisor_and_unsets_inherited_profile_co
         "--case-id",
         case.case_id,
         "--chip",
-        "sg2260e",
+        "bm1690e",
         "--runtime-mode",
         "pcie",
     ]
@@ -542,7 +542,7 @@ def test_pcie_worker_result_write_failure_preserves_launch_evidence(monkeypatch,
     payload = {
         "status": "passed",
         "case": matrix._json_normalized(case.to_json()),
-        "chip": "sg2260e",
+        "chip": "bm1690e",
         "programming_model": "tpukernel",
         "runtime_mode": "pcie",
         "metrics": {
@@ -575,7 +575,7 @@ def test_pcie_worker_result_write_failure_preserves_launch_evidence(monkeypatch,
         },
         tmp_path,
         Path("/snapshot/testing/python/jit/tpukernel_ops_worker.py"),
-        "sg2260e",
+        "bm1690e",
         case,
     )
 

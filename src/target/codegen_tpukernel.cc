@@ -1302,9 +1302,9 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     this->PrintIndent();
     this->stream << "}\n";
   } else if (op_name == "tl.tpukernel.topk") {
-    ICHECK_NE(target_chip_, "sg2260e")
+    ICHECK_NE(target_chip_, "bm1690e")
         << op_name
-        << " is unavailable on SG2260E: the PPL 1.7 "
+        << " is unavailable on BM1690E: the PPL 1.7 "
            "tpub_7_1_e runtime rejects tpu_hau_sort_natural_index";
     ICHECK_EQ(op->args.size(), 7U)
         << op_name

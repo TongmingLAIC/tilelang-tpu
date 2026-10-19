@@ -87,7 +87,7 @@ def _optimize_tpu(mod: IRModule) -> IRModule:
     mod = tilelang.transform.MergeIfStmt()(mod)
     # StorageRewrite assumes flattened storage and can duplicate the
     # structured DeclBuffer/Allocate pairs consumed by TPU codegen. BM1690 and
-    # SG2260E share this LMEM geometry; their programming models diverge later
+    # BM1690E share this LMEM geometry; their programming models diverge later
     # during target-selected code generation, not in these semantic passes.
     # Software-pipeline planning/injection remains disabled until TPU DMA and
     # compute operations have an explicit dependency/token model.  Likewise,

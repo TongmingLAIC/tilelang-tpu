@@ -22,7 +22,7 @@ Layouts, taken from the reference:
 
 Why this demo exists
     The group-wise dequantize is the one primitive in the Llama/DeepSeek set
-    that SG2260E does not expose a working lowering for.  Rather than record
+    that BM1690E does not expose a working lowering for.  Rather than record
     that as prose, this demo *measures* it: it builds the operator, compiles it
     for the requested target, and reports one of three verdicts.
 
@@ -41,7 +41,7 @@ Verdict detection
     being misreported as absence of support.
 
 Safety
-    On current SG2260E firmware the TPU-Kernel lowering emits
+    On current BM1690E firmware the TPU-Kernel lowering emits
     `tpu_bdc_f16_group_dequant`, which the vendor ships as a weak stub; the RV
     lowering is refused at compile time.  A board run that reaches the launch
     step can therefore wedge the device, which needs a driver reload to

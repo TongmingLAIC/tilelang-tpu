@@ -10,11 +10,11 @@ from typing import Any
 BASE_DTYPES = ("float16", "bfloat16", "float32")
 FP8_DTYPES = ("e4m3_float8", "e5m2_float8")
 DTYPES = BASE_DTYPES + FP8_DTYPES
-CHIP_CORE_COUNTS = {"bm1690": 8, "sg2260e": 4}
+CHIP_CORE_COUNTS = {"bm1690": 8, "bm1690e": 4}
 TARGET_CONFIGS = (
     ("bm1690", "tpukernel"),
-    ("sg2260e", "tpukernel"),
-    ("sg2260e", "rv"),
+    ("bm1690e", "tpukernel"),
+    ("bm1690e", "rv"),
 )
 CHIPS = tuple(CHIP_CORE_COUNTS)
 PROGRAMMING_MODELS = ("tpukernel", "rv")

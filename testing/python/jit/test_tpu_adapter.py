@@ -126,12 +126,12 @@ def test_cython_wrapper_build_uses_python_module_and_atomic_cache(monkeypatch, t
     assert not list(cache_root.rglob("*.tmp"))
 
 
-def _tpu_target(chip="sg2260e", programming_model="tpukernel"):
+def _tpu_target(chip="bm1690e", programming_model="tpukernel"):
     return tvm.target.Target(f"tpu -mcpu={chip} "
                              f"-tpu-programming-model={programming_model}")
 
 
-def _library_generator(chip="sg2260e", programming_model="tpukernel", runtime_mode="cmodel"):
+def _library_generator(chip="bm1690e", programming_model="tpukernel", runtime_mode="cmodel"):
     return LibraryGenerator(
         _tpu_target(chip, programming_model),
         tpu_target=TPUTargetSpec(chip, programming_model),
@@ -218,7 +218,7 @@ def test_raw_rvt_wrapper_copies_all_buffers_even_with_result_idx(tmp_path):
         scheduled_ir_module=tvm.IRModule({"opaque_rvt": _two_buffer_wrapper_primfunc}),
         source=("#define TILELANG_TPU_OPAQUE_RAW_RVT_ABI 1\n"
                 "void opaque_rvt(void) { rvt_kernel_start(); }"),
-        target=_tpu_target("sg2260e", "rv"),
+        target=_tpu_target("bm1690e", "rv"),
         output_indices=[1],
         output_dir=str(tmp_path),
     )
@@ -345,7 +345,7 @@ def test_library_generator_close_is_idempotent():
     ("TILELANG_TPU_PROFILE_RUNTIME_MODE", "pcie"),
 ])
 def test_profile_build_session_validates_all_selection_axes(monkeypatch, variable, wrong_value):
-    target = TPUTargetSpec("sg2260e", "tpukernel")
+    target = TPUTargetSpec("bm1690e", "tpukernel")
     runtime = TPURuntimeConfig("cmodel")
     monkeypatch.setenv("TILELANG_TPU_PROFILE_SESSION", "1")
     monkeypatch.setenv("TILELANG_TPU_PROFILE_CHIP", target.chip)
@@ -361,7 +361,7 @@ def test_profile_build_session_validates_all_selection_axes(monkeypatch, variabl
 
 def test_tpu_runtime_identity_is_process_global(monkeypatch):
     monkeypatch.setattr(tpu_adapter, "_TPU_RUNTIME_IDENTITY", None)
-    sg = TPUTargetSpec("sg2260e", "tpukernel")
+    sg = TPUTargetSpec("bm1690e", "tpukernel")
     bm = TPUTargetSpec("bm1690", "tpukernel")
     cmodel = TPURuntimeConfig("cmodel")
 
@@ -387,7 +387,7 @@ def test_tpu_runtime_identity_rejects_boolean_device_id(monkeypatch):
     monkeypatch.setattr(tpu_adapter, "_TPU_RUNTIME_IDENTITY", None)
     with pytest.raises(ValueError, match="non-negative int"):
         tpu_adapter.reserve_tpu_runtime_identity(
-            TPUTargetSpec("sg2260e", "tpukernel"),
+            TPUTargetSpec("bm1690e", "tpukernel"),
             TPURuntimeConfig("cmodel"),
             device_id=True,
             sdk_identity=_TEST_SDK_IDENTITY,
@@ -496,7 +496,7 @@ def test_tpu_load_rejects_a_host_library_that_rejects_device_binding(monkeypatch
 def test_pcie_load_rejects_a_cmodel_runtime_identity_before_dlopen(monkeypatch):
     monkeypatch.setattr(tpu_adapter, "_TPU_RUNTIME_IDENTITY", None)
     tpu_adapter.reserve_tpu_runtime_identity(
-        TPUTargetSpec("sg2260e", "tpukernel"),
+        TPUTargetSpec("bm1690e", "tpukernel"),
         TPURuntimeConfig("cmodel"),
         device_id=0,
         sdk_identity=_TEST_SDK_IDENTITY)
@@ -517,7 +517,7 @@ def test_pcie_load_rejects_a_cmodel_runtime_identity_before_dlopen(monkeypatch):
 def test_cmodel_load_rejects_a_pcie_runtime_identity_before_dlopen(monkeypatch):
     monkeypatch.setattr(tpu_adapter, "_TPU_RUNTIME_IDENTITY", None)
     tpu_adapter.reserve_tpu_runtime_identity(
-        TPUTargetSpec("sg2260e", "tpukernel"),
+        TPUTargetSpec("bm1690e", "tpukernel"),
         TPURuntimeConfig("pcie"),
         device_id=0,
         sdk_identity=_TEST_SDK_IDENTITY)
@@ -535,7 +535,7 @@ def test_cmodel_load_rejects_a_pcie_runtime_identity_before_dlopen(monkeypatch):
 
 def test_tpu_load_rejects_sdk_identity_transition_before_dlopen(monkeypatch):
     monkeypatch.setattr(tpu_adapter, "_TPU_RUNTIME_IDENTITY", None)
-    target_spec = TPUTargetSpec("sg2260e", "tpukernel")
+    target_spec = TPUTargetSpec("bm1690e", "tpukernel")
     runtime_config = TPURuntimeConfig("cmodel")
     tpu_adapter.reserve_tpu_runtime_identity(
         target_spec, runtime_config, device_id=0, sdk_identity=_TEST_SDK_IDENTITY)
@@ -593,11 +593,11 @@ def test_tpu_database_adapters_reject_prebuilt_artifacts_before_dlopen(monkeypat
         adapter_cls.from_database(
             params=[],
             result_idx=[],
-            target=_tpu_target("sg2260e", "tpukernel"),
+            target=_tpu_target("bm1690e", "tpukernel"),
             func_or_mod=raw_prim_func,
             kernel_global_source="",
             kernel_lib_path="/tmp/prebuilt-tpu-main.so",
-            tpu_target=TPUTargetSpec("sg2260e", "tpukernel"),
+            tpu_target=TPUTargetSpec("bm1690e", "tpukernel"),
             tpu_runtime=TPURuntimeConfig("cmodel"),
         )
     assert loaded == []
@@ -605,4 +605,4 @@ def test_tpu_database_adapters_reject_prebuilt_artifacts_before_dlopen(monkeypat
 
 def test_tpu_database_artifact_loading_is_disabled_without_manifest():
     with pytest.raises(RuntimeError, match="manifest"):
-        reject_unverified_tpu_database_artifact(_tpu_target("sg2260e", "tpukernel"))
+        reject_unverified_tpu_database_artifact(_tpu_target("bm1690e", "tpukernel"))
