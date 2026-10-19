@@ -1,96 +1,67 @@
-# Compiled Object files
+# Compiled objects and precompiled headers
 *.slo
 *.lo
 *.o
 *.obj
-*.pyc
-
-# Precompiled Headers
 *.gch
 *.pch
 
-# emacs
-*~
-
-# vim
-*.swp
-*.swo
-
+# Build and distribution output
 debug/
 build/
 /build-*/
+build_sdist/
 dist/
 wheelhouse/
-__pycache__
 nnfusion.tar.gz
+nnfusion_rt/
+models/frozenmodels/
+tilelang/lib/
 
-# makeenv and test intermediate files
-tmp/
-
+# Python environments, metadata, and caches
 venv/
 .venv/
+.tox/
+__pycache__/
+*.py[cod]
+*.egg-info
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+
+# Local configuration and editor files
+.env
 .vscode/
 .vs/
-.env
-
-# VisualGDB files
+.idea/
 VisualGDB/
 toolchain.cmake
-
-# docbuild artifacts
-doc/sphinx/build/*
-doc/doxygen/*.xml
-doc/doxygen/*.html
-doc/doxygen/man/*
-doc/doxygen/latex/*
-doc/doxygen/xml/*
-doc/doxygen/html/*
-
-# git merge
+*~
+*.swp
+*.swo
 *.orig
 \#*
 \.#*
+.DS_Store
 
-# idea
-.idea/*
-
-# python egg
-*.egg-info
-
-# Macos
-**/.DS_Store
-
-nnfusion_rt/
-models/frozenmodels/
-
-# log
+# Temporary files, logs, and memoized data
+tmp/
 *.log
-
-# pkl
 *.pkl_*
 
-# .pytest_cache
-.pytest_cache
+# Documentation build output
+doc/sphinx/build/
+doc/doxygen/*.xml
+doc/doxygen/*.html
+doc/doxygen/man/
+doc/doxygen/latex/
+doc/doxygen/xml/
+doc/doxygen/html/
 
-# .hypothesis
-.hypothesis
+# Keep the source tests whose directory is named debug
+!testing/python/debug/
 
-# .ruff_cache
-.ruff_cache
-
-# build sdist
-build_sdist/
-
-# exclude debug testing folder
-!testing/python/debug
-
-# ignore lib with develop mode
-tilelang/lib
-
-# tox
-.tox/
-
-# TPU template compile intermediates
+# TPU template compilation intermediates
 /src/tl_templates/tpu/kernel.c
 /src/tl_templates/tpu/kernel.cpp
 /src/tl_templates/tpu/kernel.h
@@ -98,14 +69,7 @@ tilelang/lib
 /src/tl_templates/tpu/main.cpp
 /src/tl_templates/tpu/main.so
 
-# Default local instruction-profile output. Curated experiment summaries live
-# under the separately ignored research/artifacts/ tree.
+# Local research, profiling output, and SDK reference material
+/research/
 /tilelang-tpu-profiles/
-
-# Local experiment logs and raw outputs. Keep them out of Git deliberately.
-/research/artifacts/
-# Historical local ISA notes were moved to .local_content. Keep the retired
-# path ignored so it cannot be recreated accidentally.
-/research/rv_tensor_extension/
-# Local SDK manuals and converted reference material are not repository data.
 /.local_content/
