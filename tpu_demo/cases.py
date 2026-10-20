@@ -33,6 +33,10 @@ OPERATIONS = (
     "llama-mlp",
     "paged-attention",
     "gptq-w4a16",
+    "w8a16-dq",
+    "w8a16-mlp",
+    "mla-decode",
+    "moe-experts",
 )
 # `gptq-w4a16` is listed here even though no current target lowers it.  The
 # demo's job is to *measure* that, and `validate_selection` must let it reach
@@ -52,6 +56,19 @@ OPERATION_DTYPES["llama-mlp"] = ("float16", "bfloat16")
 # Same reason: attention's GEMMs and softmax are evaluated in FP32 internally
 # but the cache and query tensors are half precision.
 OPERATION_DTYPES["paged-attention"] = ("float16", "bfloat16")
+# W8A16 dequantizes its fp8 weight into a half-precision one, so only FP16 and
+# BF16 are meaningful outputs; FP32 would take the matrix path, which the
+# regular local layout does not accept.
+OPERATION_DTYPES["w8a16-dq"] = ("float16", "bfloat16")
+# Same reason as llama-mlp: the GEMMs use the regular local layout, which the
+# FP32 matrix path does not accept, and the SiLU needs exp, which FP8 has none.
+OPERATION_DTYPES["w8a16-mlp"] = ("float16", "bfloat16")
+# Attention: the caches and softmax state are half precision, but the exp
+# primitive is FP32-only on RV and FP8 has no exp at all.
+OPERATION_DTYPES["mla-decode"] = ("float16", "bfloat16")
+# Routed experts are w8a16_mlp stacked over the expert axis, so the same
+# restriction applies.
+OPERATION_DTYPES["moe-experts"] = ("float16", "bfloat16")
 
 
 def kernel_variant(operation: str, dtype: str, programming_model: str) -> str:
@@ -87,6 +104,14 @@ def kernel_variant(operation: str, dtype: str, programming_model: str) -> str:
         return "paged_attention"
     if operation == "gptq-w4a16":
         return "gptq_w4a16"
+    if operation == "w8a16-dq":
+        return "w8a16_dq"
+    if operation == "w8a16-mlp":
+        return "w8a16_mlp"
+    if operation == "mla-decode":
+        return "mla_decode"
+    if operation == "moe-experts":
+        return "moe_experts"
     raise AssertionError(f"unhandled TPU demo operation: {operation}")
 
 

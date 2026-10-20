@@ -59,6 +59,20 @@ def run_case(case_id: str,
         # than raising.
         from tpu_demo.gptq_w4a16 import run
         return run(**common)
+    if case.operation == "w8a16-dq":
+        # Same shape of verdict, but for the fp8 cast/GEMM chain rather than
+        # for a dequantize instruction.
+        from tpu_demo.w8a16_dq import run
+        return run(**common)
+    if case.operation == "w8a16-mlp":
+        from tpu_demo.w8a16_mlp import run
+        return run(**common)
+    if case.operation == "mla-decode":
+        from tpu_demo.mla_decode import run
+        return run(**common)
+    if case.operation == "moe-experts":
+        from tpu_demo.moe_experts import run
+        return run(**common)
     raise AssertionError(f"unhandled registered operation {case.operation!r}")
 
 

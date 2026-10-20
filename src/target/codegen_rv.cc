@@ -494,7 +494,7 @@ void CodeGenTileLangTPU::EmitRVExp(const std::string &dst,
 void CodeGenTileLangTPU::EmitRVScatter(const std::string &dst,
                                        const std::string &src,
                                        const std::string &index,
-                                       DataType dtype) {
+                                       DataType dtype, int64_t rows) {
   // KV-cache write: scatter local rows into the paged cache at the slots named
   // by `index`.  The sequence is transcribed from the RV lowering of
   // `examples/cxx/llm/paged_attention_multicore.pl`, which emits exactly:
@@ -502,14 +502,35 @@ void CodeGenTileLangTPU::EmitRVScatter(const std::string &dst,
   //   rvt_gr(34, .., cache.addr, CONTINUOUS_LAYOUT, .., (int *)NULL);
   //   rvt_tr(9,  .., rows.addr,  FREE_LAYOUT,      .., &rows.stride);
   //   rvt_tr(8,  .., table.addr, FREE_LAYOUT,      .., &table.stride);
-  //   { uint64_t zero = 0; rvt_cfg_dmaidx(0, &zero); }
-  //   rvt_dma_fhscatter(34, 9, 8, 0, 0);
+  //   { uint64_t zero = 0; rvt_cfg_dmaidx(real_batch, &zero); }
+  //   rvt_dma_fhscatter(34, 9, 8, 0, real_batch);
+  //
+  // Three conventions here are undocumented and were each established by a
+  // board probe (see the `ppl_scatter` section of the survey note):
+  //
+  //   1. The row count rides on `rvt_cfg_dmaidx`'s first argument.  This
+  //      lowering emitted a literal 0, which makes the instruction scatter
+  //      nothing at all -- silently, since the kernel still compiles and runs.
+  //   2. `rvt_dma_fhscatter`'s trailing argument is an *accumulate* flag, not
+  //      the count.  A ramp-source probe showed the destination coming out as
+  //      `dst_old + src` when it was set.  A KV-cache write overwrites, so it
+  //      is 0.
+  //   3. The index table is 1-based: slot `n` is written by index `n + 1`, and
+  //      index 0 is skipped rather than wrapping.  The portable contract
+  //      (`dst[index[h]] = src[h]`) is 0-based, so callers compensate.
+  //
+  // The operands also have to put their row/slot axis on H, which for a rank-2
+  // TileLang buffer means declaring it rank-4 -- `NormalizeLocalShape` maps
+  // (rows, cols) to {1, rows, 1, cols}, i.e. onto the C axis, and the
+  // instruction walks H.  `ppl_scatter` imposes no rank, so this is a caller's
+  // choice rather than something the lowering can enforce.
   //
   // Note the three different descriptor shapes: the destination is a global
   // tensor under CONTINUOUS_LAYOUT with computed strides, while source and index
   // table are local tiles under FREE_LAYOUT with explicit strides -- hence
   // EmitRVDescriptor(..., hw_aligned=false) for the two local operands and a
   // hand-rolled descriptor for the global one.
+  ICHECK_GT(rows, 0) << "RV scatter needs at least one row to write";
   const auto type = RVDTypeName(dtype);
   PrintIndent();
   stream << "rvt_gr(34, PRECISION(" << type << "), FP8TYPE(" << type << "), "
@@ -523,7 +544,7 @@ void CodeGenTileLangTPU::EmitRVScatter(const std::string &dst,
   PrintIndent();
   stream << "uint64_t rv_scatter_zero = 0;\n";
   PrintIndent();
-  stream << "rvt_cfg_dmaidx(0, &rv_scatter_zero);\n";
+  stream << "rvt_cfg_dmaidx(" << rows << ", &rv_scatter_zero);\n";
   PrintIndent();
   stream << "}\n";
   PrintIndent();

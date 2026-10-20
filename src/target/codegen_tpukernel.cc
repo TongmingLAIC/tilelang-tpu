@@ -540,8 +540,15 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     ICHECK_EQ(target_programming_model_, "rv")
         << op_name
         << " has only an RV lowering; build with -tpu-programming-model=rv";
+    // The index table names one destination slot per source row, so the row
+    // count is the source tile's leading dimension.
+    ICHECK_EQ(src_operand.shape4[1], idx_operand.shape4[1])
+        << op_name << " needs one index table entry per source row, got "
+        << src_operand.shape4[1] << " rows and " << idx_operand.shape4[1]
+        << " entries";
     EmitRVScatter(dst_operand.descriptor, src_operand.descriptor,
-                  idx_operand.descriptor, dst_operand.dtype);
+                  idx_operand.descriptor, dst_operand.dtype,
+                  static_cast<int64_t>(src_operand.shape4[1]));
   } else if (op_name == "tl.tpukernel.scatter_add") {
     ICHECK_EQ(target_programming_model_, "tpukernel")
         << op_name << " requires target tpu-programming-model=tpukernel";

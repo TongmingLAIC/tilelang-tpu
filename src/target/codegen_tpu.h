@@ -144,9 +144,10 @@ private:
   void EmitRVScalar(const std::string &operation, const std::string &dst,
                     const std::string &src, DataType dtype, double value);
   // KV-cache write for paged attention: scatter local rows into a global cache
-  // using an index table.
+  // using an index table.  `rows` is the number of source rows the DMA walks;
+  // the instruction scatters nothing when it is zero.
   void EmitRVScatter(const std::string &dst, const std::string &src,
-                     const std::string &index, DataType dtype);
+                     const std::string &index, DataType dtype, int64_t rows);
   void EmitRVReduction(const std::string &operation, const std::string &src,
                        const std::string &dst, const std::string &scratch,
                        DataType dtype, int width);
