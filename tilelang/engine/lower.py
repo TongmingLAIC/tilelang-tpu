@@ -212,8 +212,8 @@ _TPU_SEMANTIC_REGION_ARGS = {
     "tl.tpu.reduce_sum": (1, 2, 3),
     "tl.tpu.reduce_max": (1, 2, 3),
     # dq2: dst, packed weights, and the packed offset|scale table are tensor
-    # regions; argument 4 is the scalar group size.
-    "tl.tpu.dq2": (1, 2, 3),
+    # regions; argument 4 is the scalar group size, 5 is explicit scratch.
+    "tl.tpu.dq2": (1, 2, 3, 5),
     # scatter: global destination, local source tile, local index table
     "tl.tpu.scatter": (1, 2, 3),
 }

@@ -86,8 +86,9 @@ def test_every_semantic_extern_has_exact_region_operand_positions():
     positions = _literal_assignment("tilelang/engine/lower.py", "_TPU_SEMANTIC_REGION_ARGS")
 
     assert set(positions) == expected
+    assert positions["tl.tpu.dq2"] == (1, 2, 3, 5)
     assert all(
-        tuple(indices) == tuple(range(1,
-                                      len(indices) + 1)) for indices in positions.values())
+        tuple(indices) == tuple(range(1, len(indices) + 1))
+        for op, indices in positions.items() if op != "tl.tpu.dq2")
     assert positions["tl.tpukernel.parallel_start"] == ()
     assert positions["tl.tpukernel.parallel_end"] == ()

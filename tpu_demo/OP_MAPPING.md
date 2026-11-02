@@ -3,7 +3,9 @@
 This document defines the public `T.ppl_*` operation contract for the
 TPU-Kernel and RV Tensor programming models. The support entries below are
 based on numerical CModel validation on BM1690 and BM1690E, followed by
-BM1690E PCIe validation where that programming model is available.
+BM1690E PCIe validation where that programming model is available. The new
+RV DQ2 software fallback has a separate CModel-only validation boundary;
+it has not been accepted on PCIe.
 
 The floating-point names used here are E4M3 (`e4m3_float8`), E5M2
 (`e5m2_float8`), FP16 (`float16`), BF16 (`bfloat16`), and FP32 (`float32`).
@@ -40,6 +42,25 @@ rank-2 shapes and the portable RHS broadcast form `(M, 1)` to `(M, W)`.
 FP8 division is deliberately rejected. Direct instruction probes either fail
 or return incorrect values, so FP8 programs must convert to FP16, BF16, or
 FP32 before division and convert back afterward.
+
+## Packed four-bit dequantization
+
+| TileLang op | TPU-Kernel mapping | RV Tensor mapping | Contract |
+| --- | --- | --- | --- |
+| `ppl_dq2` | `tpu_bdc_f16_group_dequant` (BM1690E hardware unvalidated) | `rvt_cp`/`rvt_cvt_i2i`, `rvt_lshr`, `rvt_and`, `rvt_cvt_i2f`, `rvt_cvt_f2f`, `rvt_fsub`, `rvt_fmul` | FP16/BF16 output; UINT8/16/32 packed input on RV, UINT8 only on TPU-Kernel; UINT32 FP16 offset/scale pairs |
+
+RV computes `(float32(q) - offset) * scale` and converts once to the output
+storage dtype. Codes are unsigned and packed least-significant nibble first.
+The right shift uses S8 negative shifts and round-to-zero (mode 2), then
+restores nearest-even (mode 0) for floating-point operations. No `rvt_dq2`
+instruction is emitted. All tensors are distinct rank-2 local tiles; K must
+be divisible by codes-per-word and positive group size. Explicit FP32 `(N,16)`
+scratch participates in allocation and effect analysis. RV group boundaries
+need not align to packed words. TPU-Kernel retains groups 32/64/128/256.
+
+See [the W4A16 implementation and validation boundary](LLAMA_OPERATOR_DEMO.md).
+The RV demo uses UINT32 packing; this does not establish board safety or
+resolve the reported UINT8 global-I/O hangs.
 
 ## Matrix multiplication
 

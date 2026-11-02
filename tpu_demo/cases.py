@@ -38,10 +38,8 @@ OPERATIONS = (
     "mla-decode",
     "moe-experts",
 )
-# `gptq-w4a16` is listed here even though no current target lowers it.  The
-# demo's job is to *measure* that, and `validate_selection` must let it reach
-# the compiler so the verdict comes from the toolchain rather than from this
-# table.
+# Listing a case expresses compiler capability, not PCIe acceptance. In
+# particular the RV GPTQ software fallback must pass board promotion separately.
 RV_SUPPORTED_OPERATIONS = frozenset(OPERATIONS)
 OPERATION_DTYPES = {
     operation: (BASE_DTYPES if operation == "elementwise-div" else DTYPES)

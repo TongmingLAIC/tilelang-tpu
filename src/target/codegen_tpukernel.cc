@@ -434,8 +434,8 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
                  << ".addr, " << tensors[3] << ".addr, &" << tensors[0]
                  << ".shape, " << dtype_name << ");\n";
   } else if (op_name == "tl.tpu.dq2") {
-    ICHECK_EQ(op->args.size(), 5U)
-        << op_name << " expects dst, packed weights, offset_scale, and gsize";
+    ICHECK_EQ(op->args.size(), 6U)
+        << op_name << " expects dst, packed weights, offset_scale, gsize, and scratch";
     auto dst_operand = ParseWholeBufferRegion(op->args[1], op_name + " dst", 2);
     auto packed_operand =
         ParseWholeBufferRegion(op->args[2], op_name + " src", 1);
@@ -451,10 +451,10 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     ICHECK(dst_operand.dtype == DataType::Float(16) ||
            dst_operand.dtype == DataType::BFloat(16))
         << op_name << " dst must be FP16 or BF16, got " << dst_operand.dtype;
-    ICHECK(packed_operand.dtype == DataType::UInt(8))
-        << op_name
-        << " src must be UINT8 holding two 4-bit weights per element, got "
-        << packed_operand.dtype;
+    ICHECK(packed_operand.dtype == DataType::UInt(8) ||
+           packed_operand.dtype == DataType::UInt(16) ||
+           packed_operand.dtype == DataType::UInt(32))
+        << op_name << " src must be UINT8, UINT16, or UINT32";
     ICHECK(scale_operand.dtype == DataType::UInt(32))
         << op_name
         << " offset_scale must be UINT32 (low 16 bits offset, high 16 bits "
@@ -469,10 +469,9 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     const int64_t gsize = gsize_node->value;
     ICHECK_GT(gsize, 0) << op_name << " requires a positive gsize";
     const int64_t k_extent = dst_operand.shape4[3];
-    ICHECK_EQ(packed_operand.shape4[3] * 2, k_extent)
+    ICHECK_EQ(packed_operand.shape4[3] * (packed_operand.dtype.bits() / 4), k_extent)
         << op_name
-        << " src packs two 4-bit weights per byte, so its W extent must be "
-           "half of dst's";
+        << " packed width times codes per word must equal dst width";
     ICHECK_EQ(k_extent % gsize, 0)
         << op_name << " requires gsize to divide the dst W extent";
     ICHECK_EQ(scale_operand.shape4[3], k_extent / gsize)
@@ -482,23 +481,23 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
            dst_operand.shape4[1] == scale_operand.shape4[1])
         << op_name << " requires dst, src, and offset_scale to share the N "
                        "extent";
-    // The standalone dequantize this needs exists in the TPU-Kernel layer and
-    // NOT in the RV layer.  `tpu_bdc_f16_group_dequant` is the instruction the
-    // firmware's own Llama MLP uses on this chip (see
-    // nodechip_llama_mlp_multi_core.c.o's undefined reference to it), and it is
-    // what PPL lowers `tiu::dq2` to on chips whose RV backend implements it
-    // (verified against a bm1684xe build of w4a16_matmul_dq2.pl).
-    //
-    // Do NOT lower this to `rvt_dq2`, even though the symbol exists in
-    // libfirmware_core.a: PPL's RV backend emits an unconditional assert for
-    // `tiu::dq2` ("Chip have no instruction like DQ2Op"), and emitting
-    // `rvt_dq2` directly blocks the device forever in
-    // rt_task_done_response_sync, wedging the card until it is re-modprobed.
-    ICHECK_EQ(target_programming_model_, "tpukernel")
-        << op_name
-        << " is TPU-Kernel-only on this chip. PPL's RV backend has no tiu::dq2 "
-           "lowering and a direct rvt_dq2 emission hangs the device; build with "
-           "-tpu-programming-model=tpukernel instead.";
+    auto scratch = ParseWholeBufferRegion(op->args[5], op_name + " scratch", 3);
+    ICHECK(scratch.is_local && scratch.rank == 2U &&
+           scratch.dtype == DataType::Float(32) &&
+           scratch.shape4[1] == dst_operand.shape4[1] && scratch.shape4[3] == 16)
+        << op_name << " scratch must be local FP32 (N,16)";
+    for (const auto *operand : {&dst_operand, &packed_operand, &scale_operand}) {
+      ICHECK(scratch.data_var != operand->data_var)
+          << op_name << " scratch must not alias any operand";
+    }
+    if (target_programming_model_ == "rv") {
+      EmitRVDQ2(dst_operand.descriptor, packed_operand.descriptor,
+                scale_operand.descriptor, scratch.descriptor,
+                dst_operand.dtype, packed_operand.dtype, k_extent, gsize);
+      return true;
+    }
+    ICHECK_EQ(packed_operand.dtype, DataType::UInt(8))
+        << op_name << " TPU-Kernel requires UINT8 packing";
     // Mirrors the guard the reference build emits before the call.
     ICHECK(gsize == 32 || gsize == 64 || gsize == 128 || gsize == 256)
         << op_name << " requires gsize to be 32, 64, 128, or 256, got " << gsize;

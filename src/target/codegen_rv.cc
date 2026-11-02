@@ -329,9 +329,9 @@ void CodeGenTileLangTPU::EmitRVElementwise(
   stream << "rvt_f" << operation << "(10, 8, 9);\n";
 }
 
-// Each extended operation owns CR1 and TR8..11 until its completion fence.
-// Use SDK descriptor constructors (including SIGN for integer views), not
-// the old backend's hand-encoded register words.
+// Extended operations own their fixed registers until the completion fence.
+// Most use CR1 and TR8..11; DQ2 also owns CR2 and TR12..13.
+// Use SDK descriptor constructors (including SIGN for integer views).
 void CodeGenTileLangTPU::EmitRVConstant(double value,
                                         const std::string &dtype) {
   std::ostringstream literal;
@@ -489,6 +489,65 @@ void CodeGenTileLangTPU::EmitRVExp(const std::string &dst,
   stream << "rvt_mul(9, 9, 1, 0, 0);\n";
   EmitRVDescriptor(work0, 9, false, "DT_FP32", true);
   stream << "rvt_fmul(8, 10, 9);\nrvt_fmul(8, 8, 8);\n";
+}
+
+// SG2260E has no DQ2 instruction. Work column-wise across NPU lanes so the
+// fallback needs only one FP32 EU per row, independent of K/group size.
+// RV manual: AND 3.6.9.1, signed shift operand 3.6.10.1, CVT 3.6.14.
+void CodeGenTileLangTPU::EmitRVDQ2(
+    const std::string &dst, const std::string &packed, const std::string &quant,
+    const std::string &scratch, DataType dtype, DataType packed_dtype,
+    int width, int group) {
+  const int word_bytes = packed_dtype.bits() / 8;
+  const int codes_per_word = packed_dtype.bits() / 4;
+  const std::string word_type = "DT_UINT" + std::to_string(packed_dtype.bits());
+  // Strides are expressed in descriptor elements; addresses are bytes. In
+  // particular, the UINT32 quantization table is viewed as FP16 bit patterns.
+  auto column = [&](int reg, const std::string &tensor,
+                    const std::string &type, const std::string &byte_offset,
+                    int stride_factor, bool floating) {
+    stream << "rvt_tr(" << reg << ", PRECISION(" << type << "), "
+           << (floating ? "FP8TYPE(" : "SIGN(") << type << "), "
+           << tensor << ".addr + " << byte_offset
+           << ", FREE_LAYOUT, (array4_t){.n=1, .c=" << tensor
+           << ".shape.c, .h=1, .w=1}, (int[4]){"
+           << tensor << ".stride.n * " << stride_factor << ", "
+           << tensor << ".stride.c * " << stride_factor << ", "
+           << tensor << ".stride.h * " << stride_factor << ", 1});\n";
+  };
+  stream << "{\n"
+         << "uint64_t dq_mask = 15;\n"
+         << "rvt_cr(1, PRECISION(DT_UINT32), SIGN(DT_UINT32), &dq_mask);\n"
+         << "rvt_cfg_satu(0, false);\n"
+         << "rvt_cfg_round_mode(0);\n";
+  column(9, scratch, "DT_UINT32", "0", 1, false);
+  column(10, scratch, "DT_FP32", "4", 1, true);
+  column(11, scratch, "DT_FP32", "8", 1, true);
+  column(12, scratch, "DT_FP32", "12", 1, true);
+  stream << "for (int dq_group = 0; dq_group < " << width / group
+         << "; ++dq_group) {\n";
+  column(8, quant, "DT_FP16", "dq_group * 4", 2, true);
+  stream << "rvt_cvt_f2f(11, 8);\n";
+  column(8, quant, "DT_FP16", "dq_group * 4 + 2", 2, true);
+  stream << "rvt_cvt_f2f(12, 8);\n"
+         << "for (int dq_i = 0; dq_i < " << group << "; ++dq_i) {\n"
+         << "int dq_col = dq_group * " << group << " + dq_i;\n";
+  column(8, packed, word_type,
+         "(dq_col / " + std::to_string(codes_per_word) + ") * " +
+             std::to_string(word_bytes), 1, false);
+  stream << (word_bytes == 4 ? "rvt_cp(9, 8);\n" : "rvt_cvt_i2i(9, 8);\n")
+         << "int64_t dq_shift = -(dq_col % " << codes_per_word << ") * 4;\n"
+         << "rvt_cr(2, PRECISION(DT_INT8), SIGN(DT_INT8), &dq_shift);\n"
+         // Logical right shift is rounded too; RNE would corrupt nibbles.
+         << "rvt_cfg_round_mode(2);\n"
+         << "rvt_lshr(9, 9, 2);\n"
+         << "rvt_and(9, 9, 1);\n"
+         << "rvt_cfg_round_mode(0);\n"
+         << "rvt_cvt_i2f(10, 9);\n"
+         << "rvt_fsub(10, 10, 11);\n"
+         << "rvt_fmul(10, 10, 12);\n";
+  column(13, dst, RVDTypeName(dtype), "dq_col * 2", 1, true);
+  stream << "rvt_cvt_f2f(13, 10);\n}\n}\n}\n";
 }
 
 void CodeGenTileLangTPU::EmitRVScatter(const std::string &dst,

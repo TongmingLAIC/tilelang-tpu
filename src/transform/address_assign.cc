@@ -1094,7 +1094,12 @@ private:
                op_name == "tl.tpu.add_scalar" || op_name == "tl.tpu.rsqrt") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
-    } else if (op_name == "tl.tpu.dq2" || op_name == "tl.tpu.scatter") {
+    } else if (op_name == "tl.tpu.dq2") {
+      mark_arg(1, BufferAccessKind::kWrite);
+      mark_arg(2, BufferAccessKind::kRead);
+      mark_arg(3, BufferAccessKind::kRead);
+      mark_arg(5, BufferAccessKind::kReadWrite);
+    } else if (op_name == "tl.tpu.scatter") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);

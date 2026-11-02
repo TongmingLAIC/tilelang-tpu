@@ -798,45 +798,38 @@ def ppl_rsqrt(out, inp):
     return T.call_extern("handle", "tl.tpu.rsqrt", outptr, inpptr)
 
 
+@T.macro
+def _dq2_impl(out, src_packed, offset_scale, gsize):
+    # One EU per row; four columns hold integer codes, FP32 codes, offset,
+    # and scale. Expose all scratch writes to lifetime/address analysis.
+    scratch = T.alloc_shared((out.shape[0], 16), "float32")
+    T.call_extern("handle", "tl.tpu.dq2", _tpu_tensor_region(out, "w"),
+                  _tpu_tensor_region(src_packed, "r"),
+                  _tpu_tensor_region(offset_scale, "r"), gsize,
+                  _tpu_tensor_region(scratch, "rw"))
+
+
 def ppl_dq2(out, src_packed, offset_scale, gsize):
-    """Dequantize 4-bit packed weights: `out = (src - offset) * scale`, per group.
+    """Group dequantization: ``out = cast((float32(q) - offset) * scale)``.
 
-    This is the W4A16 / GPTQ weight path -- the dequantize step that
-    `matmul_gptq_forward` and `llama_mlp_gptq_forward` perform in torch-tpu.
+    All operands are distinct rank-2 local tiles. ``out`` is FP16/BF16 (N,K).
+    ``src_packed`` is UINT8/UINT16/UINT32, with 2/4/8 unsigned four-bit codes
+    per element, least significant nibble first. Its width is K/(bits/4).
+    ``offset_scale`` is UINT32 (N,K/gsize): the low/high FP16 halves encode
+    offset/scale. These halves are bit representations, not integer values.
+    Group size is positive and divides K.
 
-    Args:
-        out: FP16 or BF16 destination tile, shape `(N, K)`.
-        src_packed: UINT8 tile of shape `(N, K // 2)`.  Each byte carries two
-            4-bit weights with the **low nibble first**, matching `input_reorder`
-            in the PPL reference `examples/cxx/matmul/w4a16_matmul_dq2.py`.  The
-            instruction consumes it as `DT_UINT4` over `K` elements, so the
-            descriptor is emitted with twice this tile's W extent.
-        offset_scale: UINT32 tile of shape `(N, K // gsize)`.  Each 32-bit word
-            packs two FP16 halves: **low 16 bits are the offset (zero-point),
-            high 16 bits are the scale**.  This is what the PPL manual specifies
-            for `dq2`, and it matches `scale_zp_reorder` in the reference above.
-        gsize: group size in elements.  `K % gsize` must be zero.
-
-    Semantics source:
-        `PPL 开发参考手册` section 4.6 (`ppl::tiu::dq2`) plus the RV signature
-        `rvt_dq2(uint64_t out, uint64_t a, uint64_t scale, uint64_t _gsize)`.
-
-    Dtype support:
-        - dst (`out`): FP16, BF16.
-        - src (`src_packed`): 4-bit packed, stored as UINT8.
-
-    Backend support:
-        - RV Tensor: `rvt_dq2(out, a, scale, gsize)`.
-        - TPU-Kernel: **not available**.  That layer exposes only the fused
-          `tpu_bdc_fp_dq2_mm2_nt/tt` forms -- there is no standalone dequantize
-          instruction to lower to.  This is also why `ppl-compile` rejects the
-          PPL-level `tiu::dq2` on this chip: the unfused form has no lowering.
+    RV uses ordinary integer AND/shift/conversion and FP32 arithmetic, then
+    rounds once to the destination dtype. No DQ2 instruction is emitted.
+    UINT16/UINT32 packing permits callers to avoid UINT8 global transfers;
+    it does not establish PCIe safety. TPU-Kernel retains the vendor UINT8
+    lowering, whose BM1690E hardware implementation is not validated.
     """
     for name, buffer in (("out", out), ("src", src_packed),
                          ("offset_scale", offset_scale)):
         _require_local_buffer(name, buffer)
     _require_dtype("out", out, {"float16", "bfloat16"})
-    _require_dtype("src", src_packed, {"uint8"})
+    _require_dtype("src", src_packed, {"uint8", "uint16", "uint32"})
     _require_dtype("offset_scale", offset_scale, {"uint32"})
     _require_rank("out", out, 2)
     _require_rank("src", src_packed, 2)
@@ -855,10 +848,10 @@ def ppl_dq2(out, src_packed, offset_scale, gsize):
     scale_n = _static_positive_dim("ppl_dq2 offset_scale N", offset_scale.shape[0])
     scale_w = _static_positive_dim("ppl_dq2 offset_scale W", offset_scale.shape[1])
 
-    if src_w * 2 != out_k:
-        raise ValueError("ppl_dq2 src holds two 4-bit weights per byte, so its W "
-                         f"extent must be half of out's: got src W={src_w}, "
-                         f"out W={out_k}")
+    codes_per_word = {"uint8": 2, "uint16": 4, "uint32": 8}[str(src_packed.dtype)]
+    if src_w * codes_per_word != out_k:
+        raise ValueError("ppl_dq2 packed width times codes per word must equal K: "
+                         f"W={src_w}, codes_per_word={codes_per_word}, K={out_k}")
     if out_k % group_size != 0:
         raise ValueError("ppl_dq2 requires gsize to divide K, got "
                          f"gsize={group_size}, K={out_k}")
@@ -870,11 +863,7 @@ def ppl_dq2(out, src_packed, offset_scale, gsize):
         raise ValueError("ppl_dq2 requires out, src, and offset_scale to share "
                          "the same N extent")
 
-    outptr = _tpu_tensor_region(out, "w")
-    srcptr = _tpu_tensor_region(src_packed, "r")
-    scaleptr = _tpu_tensor_region(offset_scale, "r")
-    return T.call_extern("handle", "tl.tpu.dq2", outptr, srcptr, scaleptr,
-                         group_size)
+    return _dq2_impl(out, src_packed, offset_scale, group_size)
 
 
 def ppl_scatter(dst, src, index):

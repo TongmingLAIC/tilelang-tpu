@@ -1,53 +1,12 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-"""GPTQ / W4A16: dequantize packed 4-bit weights, then multiply.
+"""GPTQ/W4A16: low-nibble-first packed weights, dequantization, then GEMM.
 
-This is the weight path behind torch-tpu's `matmul_gptq_forward` and
-`llama_mlp_gptq_forward`.  The reference is the vendor's own
-`examples/cxx/matmul/w4a16_matmul_dq2.pl`, which expresses the same two steps:
-dequantize the packed weight, then GEMM.
-
-Composition (no fused primitive, per the OP_MAPPING policy):
-
-    weight  = dq2(right_packed, offset_scale, group_size)   # T.ppl_dq2
-    result  = left @ weight^T                               # T.ppl_gemm
-
-Layouts, taken from the reference:
-
-    left      (M, K)      FP16/BF16 activations
-    right     (N, K/2)    UINT8; two 4-bit weights per byte, low nibble first
-    offset_scale (N, K/G) UINT32; low 16 bits = offset, high 16 bits = scale,
-                          both FP16 ("compact layout" in the PPL manual)
-    result    (M, N)      FP16/BF16
-
-Why this demo exists
-    The group-wise dequantize is the one primitive in the Llama/DeepSeek set
-    that BM1690E does not expose a working lowering for.  Rather than record
-    that as prose, this demo *measures* it: it builds the operator, compiles it
-    for the requested target, and reports one of three verdicts.
-
-        passed       compiled, ran, and matched the host oracle
-        unsupported  the target's toolchain refused to lower the dequantize;
-                     `reason` and `evidence` carry the toolchain diagnostic
-        (raises)     compiled and ran but disagreed with the oracle
-
-    So a target that gains the missing lowering starts reporting `passed` with
-    no change to this file, and a target that does not keeps a reproducible,
-    machine-readable record of why.
-
-Verdict detection
-    `unsupported` is decided by whether the toolchain error names the missing
-    dequantize (`dq2`).  Any other compilation failure is re-raised rather than
-    being misreported as absence of support.
-
-Safety
-    On current BM1690E firmware the TPU-Kernel lowering emits
-    `tpu_bdc_f16_group_dequant`, which the vendor ships as a weak stub; the RV
-    lowering is refused at compile time.  A board run that reaches the launch
-    step can therefore wedge the device, which needs a driver reload to
-    recover.  Automated board runs should use the supervised matrix runner and
-    its process-tree watchdog; `runtime_mode="cmodel"` avoids the device
-    entirely.
+RV defaults to UINT32 packing (eight codes/word) to avoid UINT8 global I/O.
+The RV dequantization uses integer AND/shift/conversion and FP32 arithmetic;
+no hardware DQ2 is emitted. TPU-Kernel retains UINT8 packing and the vendor
+lowering. Its BM1690E hardware path remains unvalidated. CModel success is
+not PCIe acceptance; board runs require the supervised promotion workflow.
 """
 
 import time
@@ -113,7 +72,8 @@ def build_gptq_w4a16(*,
                      block_m: int = DEFAULT_BLOCK_M,
                      block_n: int = DEFAULT_BLOCK_N,
                      dtype: str = "float16",
-                     programming_model: str = "rv"):
+                     programming_model: str = "rv",
+                     packed_dtype: Optional[str] = None):
     """Build the dequantize-then-GEMM program.
 
     Each block owns `(block_m, block_n)` of the result: it dequantizes that
@@ -123,6 +83,10 @@ def build_gptq_w4a16(*,
     if programming_model not in ("tpukernel", "rv"):
         raise ValueError(f"unsupported TPU programming model: {programming_model!r}")
     torch_dtype(dtype)
+    packed_dtype = packed_dtype or ("uint32" if programming_model == "rv" else "uint8")
+    if packed_dtype not in ("uint8", "uint16", "uint32"):
+        raise ValueError(f"unsupported packed dtype: {packed_dtype}")
+    codes_per_word = {"uint8": 2, "uint16": 4, "uint32": 8}[packed_dtype]
     validate_dimensions(
         OPERATION, m=m, n=n, k=k, block_m=block_m, block_n=block_n, group_size=group_size)
     validate_exact_tiling(OPERATION, ("m", m, block_m), ("n", n, block_n))
@@ -131,11 +95,12 @@ def build_gptq_w4a16(*,
         raise ValueError(f"K must be a multiple of the 32-element EU width, got {k}")
 
     @T.prim_func
-    def gptq_w4a16(left: T.Tensor((m, k), dtype), right: T.Tensor((n, k // 2), "uint8"),
-                   offset_scale: T.Tensor((n, groups), "uint32"), result: T.Tensor((m, n), dtype)):
+    def gptq_w4a16(left: T.Tensor((m, k), dtype), right: T.Tensor(
+        (n, k // codes_per_word), packed_dtype), offset_scale: T.Tensor((n, groups), "uint32"),
+                   result: T.Tensor((m, n), dtype)):
         with T.Kernel(T.ceildiv(m, block_m), T.ceildiv(n, block_n), is_cpu=True) as (bx, by):
             left_compute = T.alloc_shared((block_m, k), dtype)
-            packed_compute = T.alloc_shared((block_n, k // 2), "uint8")
+            packed_compute = T.alloc_shared((block_n, k // codes_per_word), packed_dtype)
             offset_scale_compute = T.alloc_shared((block_n, groups), "uint32")
             weight_compute = T.alloc_shared((block_n, k), dtype)
             accumulate = T.alloc_shared((block_m, block_n), "float32")
@@ -150,16 +115,21 @@ def build_gptq_w4a16(*,
             T.ppl_copy(left[bx * block_m, 0], left_compute)
 
             T.ppl_fill(accumulate, T.float32(0.0))
-            T.ppl_gemm(left_compute, weight_compute, accumulate,
-                       transpose_B=True, accumulate=False)
+            T.ppl_gemm(left_compute, weight_compute, accumulate, transpose_B=True, accumulate=False)
             T.ppl_copy(accumulate, output_compute)
             T.ppl_copy(output_compute, result[bx * block_m, by * block_n])
 
     return gptq_w4a16
 
 
-def host_inputs(*, m: int, n: int, k: int, group_size: int, dtype: str,
-                seed: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def host_inputs(*,
+                m: int,
+                n: int,
+                k: int,
+                group_size: int,
+                dtype: str,
+                seed: int,
+                packed_dtype: str = "uint32") -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build GPTQ-shaped host tensors: packed 4-bit codes plus per-group offset/scale.
 
     The codes are drawn independently of the offset/scale so the oracle
@@ -172,7 +142,11 @@ def host_inputs(*, m: int, n: int, k: int, group_size: int, dtype: str,
 
     # Two 4-bit codes per byte, low nibble first (input_reorder in the reference).
     codes = torch.randint(0, 16, (n, k), generator=generator, dtype=torch.int64)
-    right = (codes[:, 0::2] | (codes[:, 1::2] << 4)).to(torch.uint8)
+    codes_per_word = {"uint8": 2, "uint16": 4, "uint32": 8}[packed_dtype]
+    right = torch.zeros((n, k // codes_per_word), dtype=torch.int64)
+    for index in range(codes_per_word):
+        right |= codes[:, index::codes_per_word] << (4 * index)
+    right = right.to(getattr(torch, packed_dtype))
 
     # One (offset, scale) pair per group, packed low-half offset / high-half
     # scale, both FP16 (scale_zp_reorder in the reference).
@@ -186,8 +160,8 @@ def host_inputs(*, m: int, n: int, k: int, group_size: int, dtype: str,
     return left, right, offset_scale
 
 
-def torch_reference(left: torch.Tensor, right: torch.Tensor, offset_scale: torch.Tensor, *,
-                    n: int, k: int, group_size: int) -> torch.Tensor:
+def torch_reference(left: torch.Tensor, right: torch.Tensor, offset_scale: torch.Tensor, *, n: int,
+                    k: int, group_size: int) -> torch.Tensor:
     """Host oracle: unpack the 4-bit weights, dequantize per group, then GEMM.
 
     Mirrors `input_reorder` and `scale_zp_reorder` from
@@ -198,9 +172,9 @@ def torch_reference(left: torch.Tensor, right: torch.Tensor, offset_scale: torch
     groups = _group_count(k, group_size)
 
     packed = right.to(torch.int64)
-    low = packed & 0x0F
-    high = (packed >> 4) & 0x0F
-    codes = torch.stack((low, high), dim=-1).reshape(n, k).to(torch.float32)
+    codes_per_word = right.element_size() * 2
+    codes = torch.stack([(packed >> (4 * i)) & 0xF for i in range(codes_per_word)],
+                        dim=-1).reshape(n, k).to(torch.float32)
 
     halves = offset_scale.view(torch.uint16).reshape(n, groups, 2)
     offset = halves[..., 0].view(torch.float16).to(torch.float32)
@@ -208,7 +182,7 @@ def torch_reference(left: torch.Tensor, right: torch.Tensor, offset_scale: torch
     offset = offset.repeat_interleave(group_size, dim=1)
     scale = scale.repeat_interleave(group_size, dim=1)
 
-    weight = (codes - offset) * scale
+    weight = ((codes - offset) * scale).to(left.dtype).float()
     return torch.nn.functional.linear(left.float(), weight)
 
 
@@ -231,6 +205,7 @@ def run(*,
     )
 
     m, n, k, group_size = DEFAULT_M, DEFAULT_N, DEFAULT_K, DEFAULT_GROUP_SIZE
+    packed_dtype = "uint32" if programming_model == "rv" else "uint8"
     parameters = {
         "m": m,
         "n": n,
@@ -239,10 +214,11 @@ def run(*,
         "block_m": DEFAULT_BLOCK_M,
         "block_n": DEFAULT_BLOCK_N,
         "seed": seed,
+        "packed_dtype": packed_dtype,
     }
 
     left, right, offset_scale = host_inputs(
-        m=m, n=n, k=k, group_size=group_size, dtype=dtype, seed=seed)
+        m=m, n=n, k=k, group_size=group_size, dtype=dtype, seed=seed, packed_dtype=packed_dtype)
     result = torch.zeros((m, n), dtype=torch_dtype(dtype))
     program = build_gptq_w4a16(
         m=m,
@@ -252,7 +228,8 @@ def run(*,
         block_m=DEFAULT_BLOCK_M,
         block_n=DEFAULT_BLOCK_N,
         dtype=dtype,
-        programming_model=programming_model)
+        programming_model=programming_model,
+        packed_dtype=packed_dtype)
 
     begin = time.monotonic()
     try:

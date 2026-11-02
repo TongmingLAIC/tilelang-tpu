@@ -1,232 +1,144 @@
-# GPTQ / W4A16（算子三）RV 迁移问题
+# GPTQ / W4A16：BM1690E RV 软件反量化
 
-> 芯片：**BM1690E**（BM1690 同族）
-> 分支：`spike/agent-address-pipeline`
-> SDK：PPL v1.7.122
+当前上游统一使用 `BM1690E` / `bm1690e` 命名；下文历史验证记录中的
+SG2260E 对应同一 `tpub_7_1_e` SDK 架构，历史手册名称保持原样。
 
----
+SG2260E 指令集不支持 DQ2。RV 后端通过普通整数及浮点指令实现
+`ppl_dq2`，不发射 `rvt_dq2`，也不调用 TPU-Kernel 的反量化符号。
+这解决的是编译器和 CModel 上的软件实现；**尚未完成 PCIe 验收**。
 
-## 一、问题
+## 数据与数值契约
 
-**GPTQ / W4A16 算子在 BM1690E 的 RV 通路上跑不起来。**
+`T.ppl_dq2(out, src_packed, offset_scale, gsize)` 接受互不别名的 rank-2
+local tensor：
 
-根因：这颗芯片上负责"4-bit 权重分组反量化"的原语（`tiu::dq2` → `rvt_dq2` / `tpu_bdc_f16_group_dequant`）**在两个后端上都没有可用实现**。
+- `out`：FP16/BF16，形状 `(N,K)`。
+- `src_packed`：UINT8、UINT16 或 UINT32，每元素含 2、4 或 8 个无符号
+  4-bit code，最低有效 nibble 在前。宽度为 `K / codes_per_word`。
+- `offset_scale`：UINT32，形状 `(N,K/gsize)`；低 16 位是 FP16 offset，
+  高 16 位是 FP16 scale 的**位模式**。BF16 输出也使用 FP16 参数。
+- `gsize`：正整数，整除 K。RV 支持组边界落在 packed word 内部。
 
-不是我们的接入问题 —— 是这条硬件通路在 RV 侧不存在，TPU-Kernel 侧只有桩。
+RV 在 FP32 中分别执行 `(q - offset)` 和乘 scale，最后以 nearest-even
+转换到输出类型一次；不做饱和，保留 NaN/Inf 和溢出到 Inf 的行为。
+GEMM 使用已经转换到输出类型的权重。主机 oracle 同样显式执行这个
+中间舍入，不能拿未经 FP16/BF16 舍入的权重冒充设备 GEMM 的输入。
 
----
+## 指令序列与布局
 
-## 二、阻塞证据链
+依据《SG2260E RV 架构手册》§3.6.9.1（第 42 页）、§3.6.10.1
+（第 44 页）、§3.6.14（第 51–52 页）及 §3.1.4（第 6 页）：
 
-### ① 厂商自己的参考实现就编不过
+1. 把当前 packed word 复制或零扩展到 UINT32 scratch。
+2. `rvt_lshr` 使用 S8 **负移位量**，右移 `4 * nibble_index`。
+   设置 `rvt_cfg_round_mode(2)`（向零舍入），防止默认 nearest-even
+   在右移时改变高 nibble；随后 `rvt_and(..., 0xF)`。
+3. 恢复 `round_mode(0)`，用 `rvt_cvt_i2f` 转为 FP32。
+4. 将参数表的两个半字以 FP16 描述符解释，并转为 FP32。
+5. `rvt_fsub`、`rvt_fmul`，最后 `rvt_cvt_f2f` 写入对应输出列。
 
-用 PPL SDK 重编 `examples/cxx/matmul/w4a16_matmul_dq2.pl`，两个 dq2 调用点（`right_slice` 真/假两个分支，覆盖**全部**路径）都生成无条件断言：
+各列并行处理 N 个通道，顺序写入解包后的 K 列，避免额外交错搬运。
+使用固定的 CR1/CR2、TR8–TR13；遵守现有同步边界，不启用异步流水线。
+工作区是显式的 `(N,16)` FP32 tile，仅前四列存放中间结果。完整 tile
+纳入读写效果、活跃区间及 LMEM 分配；源权重和参数表只读。
+这是正确性优先的逐列实现，**没有性能验收或吞吐量承诺**。
 
-```c
-TPUKERNEL_ASSERT( 0 && "Chip have no instruction like DQ2Op!!!\n");
-```
+RV demo 默认使用 UINT32 打包，以避免已报告的 UINT8 全局 I/O 路径。
+每个 UINT32 的八个 code 按低位在前排列；外部 UINT8 权重可在主机
+按字节重新打包为 UINT32，无需在主机反量化。旧 UINT8 local 契约仍保留。
+改变打包类型不等于已证明硬件安全。
 
-`--chip=bm1690e`（tpukernel）与 `--chip=tpub_7_1_e --rv` **两者都断言**。
+## 验证入口
 
-### ② 固件里有符号，但手工发射会把卡挂死
-
-`rvt_dq2` 声明在 `deps/chip/tpub_7_1_e/TPU1686/kernel/include/rvt_api.h`，且在 `libfirmware_core.a` 里有定义（`nm` 显示 `T`）。
-
-**但手工发射它会卡死在 `rt_task_done_response_sync`**，必须 `sudo rmmod sgcard && sudo modprobe sgcard` 才能恢复。符号存在，后面是空的。
-
-### ③ 厂商把操作数准备完了，却拒绝发这条指令
-
-断言前一行：
-
-```c
-ppl_tensor_t right_local_u4_v175 = {..., .dtype = DT_UINT4, .align_mode = 1, ...};
-rvt_tr(8, PRECISION(DT_UINT4), SIGN(DT_UINT4), right_local_u4_v175.addr,
-       HW_ALIGN_LAYOUT, (array4_t){...}, (int *)NULL);
-TPUKERNEL_ASSERT( 0 && "Chip have no instruction like DQ2Op!!!\n");
-```
-
-**寄存器 8 正是 `rvt_dq2` 的 `a` 操作数** —— 描述符构造好、装进去了，然后拒绝发指令。这不是运行时检查，是厂商后端映射表的缺项。
-
-### ④ TPU-Kernel 侧的分组反量化在硬件上是桩
-
-`tpu_bdc_f16_group_dequant`：
-
-| 位置 | 符号类型 |
-|---|---|
-| `libfirmware_core.a:nodechip_llama_mlp_multi_core.c.o` | `U`（固件自己的 Llama MLP 引用它） |
-| `libfirmware_core.a:tpu_kernel_common.c.o` | **`W` 弱符号，110 字节** |
-| `libtpuv7_emulator.so` | `T` 强定义 |
-
-**只有模拟器里有真实现，硬件侧是 110 字节的弱桩**（真正的分组反量化实现不可能只有这个体量）。
-
-### ⑤ 厂商自己的 RV 编译器从不发射任何 `rvt_dq*`
-
-统计厂商**自己**为 BM1690E 的 RV 通路生成的 C 代码（`paged_attention_multicore.c`）中的指令出现次数：
-
-| 指令 | 次数 |
-|---|---|
-| `rvt_and` / `rvt_cvt_i2i` / `rvt_cvt_i2f` | 1 / 1 / 1 |
-| `rvt_mul` / `rvt_sub` | 2 / 1 |
-| **`rvt_dq*`** | **0** |
-
-同样，`w4a16_matmul_dq2.pl` 的 RV 产物里 `rvt_dq*` 也是 **0** 次 —— 所有 dq2 调用点都换成了断言。
-
-**结论：RV 层这条路不通，不是"还没映射"。**
-
----
-
-## 三、附带发现：手册 4.6 的 cast 转型表与真机不符
-
-排查替代方案时发现，手册 `ppl::tiu::cast` 的转型表在真机上不成立。手册把 INT8/UINT8 作**源**的两行标为空，且没有 INT4/UINT4 的行或列。
-
-**真机实测**（BM1690E，PPL harness，PCIe），设备输出 vs 参考模型：
-
-| 用例 | 手册预期 | 真机结果 |
-|---|---|---|
-| `fp32 → fp16`（对照） | 支持 | ✅ 0/4096 不匹配 |
-| `int32 → fp16` / `int16 → fp16` | 支持 | ✅ 0/4096 |
-| **`int8 → fp16`** | **不支持** | **✅ 0/4096（手册错误）** |
-| `fp16 → int8` | 支持 | ❌ 挂卡 |
-| `int8 → int8`（**纯拷贝，无 cast**） | — | ❌ 挂卡 |
-| `int4 / uint4 → fp16` | 不支持 | ⏸ 未测到（见 §4） |
-
-`int8 → fp16` 是真正的整数→浮点转换，不是字节重解释：输入 int8 的 `27` 若按字节重解释为 fp16 会得到 ~2.6e-5 的次正规数，实测得到 **27.0**。
-
-另：`tiu::cast` 在头文件里是**完全无约束的模板**，`ppl-compile` 对 dtype 组合**不做任何合法性校验** —— 含 4-bit 双向在内的 9 个用例全部 `rc=0` 通过，且 16/8/4 位整数源发射**同一形式**的指令。
-
-**所以编译通过不构成证据，唯一判据是真机行为。**
-
----
-
-## 四、附带发现：8 位整数作为全局缓冲区会挂卡
-
-**纯拷贝 `int8 → int8`（一行 cast 都没有）同样挂卡** —— 说明挂卡出在 **8 位整数作为全局缓冲区**的 I/O 路径上，与 cast 指令的 dtype 支持无关。
-
-拆开看是两个独立问题：
-
-- **8 位整数作全局输出** → `fp16→int8`、`int8→int8` 均挂
-- **uint8 作全局输入** → `uint8→fp16` 挂（但 `int8→fp16` 正常）
-
-挂卡特征：进程进入 `D`（不可中断睡眠），wchan 为 `send_quit_request`，`timeout` 与 `SIGTERM` 均无法终止，**需 `sudo rmmod sgcard && sudo modprobe sgcard`**。
-
-这直接限制了低精度实验的能力：**`int4 / uint4 → fp16` 至今未能测到**，属"方法尚未建立"，而非"已证明不支持"。
-
----
-
-## 五、需要确认 / 协助的事项
-
-| # | 事项 |
-|---|---|
-| 1 | **BM1690E 的 RV 通路上能否补齐 4-bit 分组反量化。** 若不能，请明确 4-bit 量化权重在这颗芯片上的推荐做法 |
-| 2 | **4-bit 拆包能否用现有基础指令组合实现。** 若能，我们可以自己拼出反量化，不必依赖 `rvt_dq2` |
-| 3 | **修正手册 4.6 数据类型转换表的错误**（`int8 → fp16` 实际可用） |
-| 4 | **排查 8 位整数作全局缓冲区导致挂卡的问题** |
-
----
-
-## 六、如何验证已经修好
-
-**验收用例已入库**：[`gptq_w4a16/gptq_w4a16.py`](gptq_w4a16/gptq_w4a16.py)
-
-用例自带一个**主机侧 oracle**（torch 实现的语义参考）。跑完把设备输出与 oracle 逐元素比对，返回机器可读的 JSON：
-
-| `status` | 含义 |
-|---|---|
-| **`passed`** | 编译通过 → 上板跑通 → 与 oracle 在容差内一致。**这就是"修好了"。** |
-| **`unsupported`** | 工具链拒绝降级该原语，`evidence` 带编译器原文。**这是"还没好"，且是可复现的、非断言的记录。** |
-| 抛异常 | 跑通了但数值不符，或环境问题 |
-
-### 跑法
+从仓库根目录，使用匹配此源码的独立 native build 和 PPL v1.7.122
+完整开发包。将仓库加入 `PYTHONPATH`，并确保 `python` 指向该环境。
+最新上游要求通过隔离 launcher 运行，不能直接使用共享 `/tmp`；需要
+Linux user namespace 和 bubblewrap。`tpu_demo.run` **只运行 CModel**：
 
 ```bash
-# 矩阵 runner（带看门狗、首次失败即停）
-python testing/python/jit/tpu_demo_ops_matrix.py \
-    --runtime-mode pcie --chip bm1690e --programming-model rv \
-    --case gptq-w4a16.float16 --device-id 0 --allow-pcie --allow-pcie-profile \
-    --output-dir /tmp/matrix
+python -m pytest -q testing/python/jit/test_tpu_rv_dq2.py
+
+# 从仓库根目录执行；每轮使用新的绝对结果目录。
+repo_root="$PWD"
+run_dir="$PWD/research/artifacts/dq2-$(date +%Y%m%d-%H%M%S)"
+for case in $(seq 0 47); do
+  python -m tilelang.jit.tpu_cmodel --output-dir "$run_dir/dq-$case" -- \
+    python "$repo_root/testing/python/jit/test_tpu_rv_dq2.py" --case "$case" || exit 1
+done
+for case in $(seq 0 11); do
+  python -m tilelang.jit.tpu_cmodel --output-dir "$run_dir/gptq-$case" -- \
+    python "$repo_root/testing/python/jit/test_tpu_rv_dq2.py" --gptq-case "$case" || exit 1
+done
+for dtype in float16 bfloat16; do
+  python -m tilelang.jit.tpu_cmodel --output-dir "$run_dir/demo-$dtype" -- \
+    python -m tpu_demo.run --case "gptq-w4a16.$dtype" \
+      --chip bm1690e --programming-model rv || exit 1
+done
 ```
 
-修好之后 `status` 应变为 `passed`，形如：
+48 项定向测试覆盖三种 packing × 两种输出 dtype × 八组配置：全部
+256 种字节值、1/63/64/65/129 行、8–4096 列、组大小 1/3/4/32/64/128/256、
+负数及小数 offset/scale、NaN/Inf/溢出；重复调用检查输入未被破坏。
+要求反量化输出与独立主机参考逐元素相等（NaN 位置相等），不放宽容差。
+另有 native scratch 拒绝测试、注册表对齐和 LMEM 活跃存储不重叠测试。
 
-```json
-{
-  "status": "passed",
-  "operation": "gptq-w4a16", "dtype": "float16",
-  "chip": "bm1690e", "programming_model": "rv",
-  "metrics": {"passed": true, "atol": 0.01, "rtol": 0.01,
-              "max_abs_error": 0.0009765625,
-              "mismatched_elements": 0, "element_count": 2048}
-}
-```
+### 本轮实际结果（2026-10-19 执行，2026-10-21 整理）
 
+基线为 `e31b98ec4cdb74d33d5663d0d9512b71fcfb9b98`，固定 TVM
+`a8a54d2b1f43c23a47f2fc08779654918eae6464`，独立构建 native 库，使用
+PPL `v1.7.122-g05ebfb36-20260528`，未复用旧工作树 native 产物。
 
-### 当前状态（改之前）
+- SG2260E RV 反量化：**48/48**；共 183408 个输出元素，有限值误差为零，
+  NaN 位置一致。
+- SG2260E RV 反量化 + GEMM：**12/12**；三种 packing、FP16/BF16、
+  单 tile 和多 tile，沿用 matmul 的原有容差。
+- 默认 GPTQ RV demo：FP16/BF16 **2/2**，均返回 `passed`，无不匹配元素。
+- 前端、描述符、残余 IR、注册表、LMEM、demo/core/FP8 矩阵与 RVT
+  静态检查：**686 passed，6 deselected**；六项 PCIe 编译链接检查依赖
+  本机缺失的 `libtpuv7_rt.so`，未用 emulator 替代。随后新增默认 packing
+  一致性测试，单独复跑 DQ2 文件 **14/14**（其余 13 项包含在前述 686 项内）。
+- 额外尝试 BM1690 TPU-Kernel FP16 GPTQ CModel 时，SDK 的
+  `tpub_7_1/lib/libtpuv7_emulator.so` 在 `tpu_bdc_f16_group_dequant` 内
+  报 `is not supported on SG2260` 并断言。后续 TPU-Kernel 数值测试停止；
+  不能把模拟器含有该符号解释为它可用。本分支未改用该路径实现 RV。
 
-| 后端 | 表现 |
-|---|---|
-| **RV Tensor** | 编译期拒绝，用例返回 `status: unsupported`，`evidence.message` 为编译器原文 |
-| **TPU-Kernel** | 能编译（发射 `tpu_bdc_f16_group_dequant`），但该符号在固件里是桩。未做上板验证 |
+以上是定向 CModel 验证，**不是 BM/SG 全部 79 项 demo 的完整 promotion
+矩阵，也不是 PCIe 或性能验收**。未连接板卡、未执行 reset 或驱动操作。
 
-> ⚠️ **已知障碍**：目标缺 lowering 时，用例在 **cmodel 下干净返回 `unsupported`**，但在 **PCIe + profile 环境下会 SIGSEGV** —— TVM 的致命错误路径抓 backtrace 时自己崩了（gdb 栈落在 `_Unwind_Backtrace` → `backtrace_syminfo` → `__memmove_avx512_unaligned_erms`）。`TVM_BACKTRACE=0` 无效。**目前 `unsupported` 这个结论只能在 CModel 下拿到。**
->
-> runner 的 `--runtime-mode pcie` 还要求先有 `--bm-cmodel-summary` / `--sg-cmodel-summary` 的 CModel 阶段产物，而 **CModel 需要 root**。
+### 2026-10-27 rebase 验证边界
 
----
+本分支已适配上游 `cd8356559fd636aa51d91c7c41ebafe76c557626`，保留
+BM1690E 命名、新 scatter 行数参数、并行命令注册及新版地址分配。
+DQ2 的 scratch 读写合入新分配器的实际分派分支，避免重复分支漏记。
 
-## 七、相关文件在仓库中的位置
+native 重建成功；DQ2、前端契约、描述符、语义注册、残余 IR 及地址分配
+测试 **257 passed**。尝试经上游私有 IPC launcher 复测 CModel 时，
+bubblewrap 在挂载 `/proc` 阶段返回 `Operation not permitted`，未进入
+数值 launch；没有绕过隔离要求。上面的 62 项数值通过记录只属于旧基线，
+不能作为本次 rebase 的数值验收。需在允许该 namespace/mount 操作的
+环境重新运行上述 CModel 命令。本次没有进行 PCIe 测试。
 
-### 用例与判定
+## 硬件限制及后续验收
 
-| 文件 | 仓库位置 | 说明 |
-|---|---|---|
-| GPTQ 验收用例 | [`tpu_demo/gptq_w4a16/gptq_w4a16.py`](gptq_w4a16/gptq_w4a16.py) | 算子本体 + 主机 oracle + 三态判定 |
-| 用例注册表 | [`tpu_demo/cases.py`](cases.py) | `--case` 的取值来源 |
-| 公共判定与容差 | [`tpu_demo/common.py`](common.py) | `DemoUnsupported` / `unsupported_payload` / 容差家族 |
-| 矩阵 runner | [`testing/python/jit/tpu_demo_ops_matrix.py`](../testing/python/jit/tpu_demo_ops_matrix.py) | 带看门狗的上板入口 |
-| 算子-指令映射契约 | [`tpu_demo/OP_MAPPING.md`](OP_MAPPING.md) | 各算子到指令的映射 |
+此前问题记录见 [issue #48](https://github.com/TongmingLAIC/tilelang-tpu/issues/48)：
 
-### 算子三相关的实现
+- 厂商 PPL 的 W4A16 DQ2 示例生成 `Chip have no instruction like DQ2Op`
+  断言；头文件中的 `rvt_dq2` 声明不能作为支持依据。
+- 手工发射 `rvt_dq2` 曾挂卡，禁止再次试探。
+- UINT8 全局输入及 INT8 全局输出曾有挂卡报告。软件拆包没有修复 DMA
+  或驱动问题；UINT8 CModel 通过不代表该 I/O 在真机安全。
+- TPU-Kernel 仍仅接受 UINT8 packing 和组大小 32/64/128/256，沿用
+  `tpu_bdc_f16_group_dequant`。此前记录其硬件符号是弱桩；不能通过切换
+  后端把它当成硬件可用的替代方案。
 
-| 文件 | 仓库位置 | 说明 |
-|---|---|---|
-| `ppl_dq2` 前端 contract | [`tilelang/language/customize.py`](../tilelang/language/customize.py) | 参数校验 + 语义说明 |
-| `tl.tpu.dq2` 的 codegen | [`src/target/codegen_tpukernel.cc`](../src/target/codegen_tpukernel.cc) | **含 RV 路径的显式拒绝**（`ICHECK_EQ(target_programming_model_, "tpukernel")`） |
+任何 PCIe 验证必须先完整通过匹配源码/native/SDK 身份的 BM1690 和
+SG2260E CModel 矩阵，再使用受监督 runner、共享板卡锁、session 和
+quarantine 协议。新整数指令组合的硬件行为尚未验收，执行前应由维护者
+协调可恢复板卡的人员；不能把杀掉 host 进程当作板卡恢复。
 
-### 不在仓库中的证据（本地）
+## 其他模型算子
 
-以下证据文件目前**不在 git 仓库里**，需要的话可以一并入库：
-
-| 用途 | 本地路径 |
-|---|---|
-| cast dtype 阶梯探针（编译期 9 用例） | `dq2-verify/cast_probe/cast_ladder.py` |
-| cast 真机验证 | `dq2-verify/cast_hw/run_case.sh` |
-| 厂商 `.pl` 的 RV 编译产物（含断言原文） | `dq2-verify/rv_compile/`、`dq2-verify/tpk_compile/` |
-| W4A16 TileLang 侧早期尝试 | `dq2-verify/w4a16_matmul_kernel.py` |
-
----
-
-## 八、其余三个算子的验收
-
-其余三个算子（RMSNorm / Llama MLP / Paged Attention）**当前均已在 BM1690E 上通过**，判据与命令和算子三完全相同 —— **只需换 `--case`**。
-
-| 算子 | 用例 | 实现（仓库位置） |
-|---|---|---|
-| 一、RMSNorm | `rmsnorm.float16`、`rmsnorm.bfloat16` | [`rmsnorm/rmsnorm.py`](rmsnorm/rmsnorm.py) |
-| 二、Llama MLP | `llama-mlp.float16`、`llama-mlp.bfloat16` | [`llama_mlp/llama_mlp.py`](llama_mlp/llama_mlp.py) |
-| 四、Paged Attention | `paged-attention.float16`、`paged-attention.bfloat16` | [`paged_attention/paged_attention.py`](paged_attention/paged_attention.py) |
-
-```bash
-python testing/python/jit/tpu_demo_ops_matrix.py \
-    --runtime-mode pcie --chip bm1690e --programming-model rv \
-    --case llama-mlp.float16 --device-id 0 --allow-pcie --allow-pcie-profile \
-    --output-dir /tmp/matrix
-```
-
-**已实测结果**（BM1690E，PCIe）：
-
-| 用例 | status | 不匹配 | 最大误差 | 容差 |
-|---|---|---|---|---|
-| `llama-mlp.float16` | ✅ passed | 0/2048 | 9.8e-4 | 1e-2 |
-| `llama-mlp.bfloat16` | ✅ passed | 0/2048 | 3.9e-3 | 3e-2 |
-| `paged-attention.float16` | ✅ passed | 0/256 | 1.2e-4 | 2e-2 |
-| `paged-attention.bfloat16` | ✅ passed | 0/256 | 9.8e-4 | 2e-2 |
+Llama MLP、paged attention 的 FP16/BF16 PCIe 通过记录来自上游此前
+验证，本次 DQ2 定向测试不重新证明这些结果，也不构成完整模型验收。
+对应入口分别在 `tpu_demo/llama_mlp/`、`tpu_demo/paged_attention/`；
+通用矩阵和 profiling 流程以 `tpu_demo/README.md` 为准。

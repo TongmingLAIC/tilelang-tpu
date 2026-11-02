@@ -734,3 +734,23 @@ if __name__ == "__main__":
     test_reduce_tmp_is_separated_from_input_bank()
     test_exp_composite_operands_are_conservative_bank_clique()
     test_address_assignment_rejects_non_tpu_target()
+
+
+def test_dq2_scratch_and_operands_have_disjoint_live_storage():
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, is_cpu=True):
+            packed = T.alloc_shared((65, 32), "uint32")
+            quant = T.alloc_shared((65, 2), "uint32")
+            result = T.alloc_shared((65, 256), "float16")
+            T.ppl_dq2(result, packed, quant, 128)
+
+    attrs = _assigned_attrs(main)
+    scratch = _single_attr_with_prefix(attrs, "scratch")
+    # Physical bytes per lane, including the second C block and EU padding.
+    intervals = [(_addr(attrs, name), size) for name, size in
+                 (("packed", 256), ("quant", 128), ("result", 1024), (scratch, 128))]
+    for i, (left, left_size) in enumerate(intervals):
+        for right, right_size in intervals[i + 1:]:
+            assert left + left_size <= right or right + right_size <= left
