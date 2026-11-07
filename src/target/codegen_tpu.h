@@ -152,6 +152,16 @@ private:
   // the instruction scatters nothing when it is zero.
   void EmitRVScatter(const std::string &dst, const std::string &src,
                      const std::string &index, DataType dtype, int64_t rows);
+  void EmitRVScatterAdd(const std::string &dst, const std::string &src,
+                        const std::string &index, DataType dtype,
+                        int destination_rows, int source_rows, int width);
+  void EmitRVGather(const std::string &dst, const std::string &param,
+                    const std::string &index, DataType dtype,
+                    int parameter_rows, int count, int width);
+  void EmitRVTopK(const std::string &dst, const std::string &indices,
+                  const std::string &src, DataType dtype, bool is_local,
+                  int rows, int length, int k, bool descending,
+                  const std::vector<std::string> &workspace);
   void EmitRVReduction(const std::string &operation, const std::string &src,
                        const std::string &dst, const std::string &scratch,
                        DataType dtype, int width);
