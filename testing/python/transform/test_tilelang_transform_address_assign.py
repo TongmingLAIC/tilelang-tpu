@@ -237,7 +237,11 @@ def test_rv_scatter_separates_local_source_and_index_reads():
     assert _addr(attrs, "source") // BANK_SIZE != _addr(attrs, "index") // BANK_SIZE
 
 
-def test_scatter_add_preserves_distinct_internal_row_tiles():
+@pytest.mark.parametrize("target_spec", [
+    "tpu -mcpu=bm1690 -tpu-programming-model=tpukernel",
+    "tpu -mcpu=bm1690e -tpu-programming-model=rv",
+])
+def test_scatter_add_preserves_distinct_internal_row_tiles(target_spec):
 
     @T.prim_func
     def main(dst: T.Tensor((4, 32), "float16"),
@@ -246,10 +250,38 @@ def test_scatter_add_preserves_distinct_internal_row_tiles():
         with T.Kernel(1, is_cpu=True):
             T.ppl_scatter_add(dst, src, indices)
 
-    attrs = _assigned_attrs(main)
+    attrs = _assigned_attrs(main, target_spec=target_spec)
     accumulator = _single_attr_with_prefix(attrs, "accumulator")
     source_row = _single_attr_with_prefix(attrs, "source_row")
     assert _addr(attrs, accumulator) // BANK_SIZE != _addr(attrs, source_row) // BANK_SIZE
+
+
+def test_rv_topk_keeps_all_live_operands_and_workspaces_disjoint():
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, is_cpu=True):
+            src = T.alloc_shared((1, 33), "float32")
+            values = T.alloc_shared((1, 7), "float32")
+            indices = T.alloc_shared((1, 7), "int32")
+            w0 = T.alloc_shared((1, 64), "uint32")
+            w1 = T.alloc_shared((1, 64), "uint32")
+            w2 = T.alloc_shared((1, 64), "uint32")
+            w3 = T.alloc_shared((1, 64), "uint32")
+            w4 = T.alloc_shared((1, 64), "uint32")
+            w5 = T.alloc_shared((1, 64), "uint32")
+            w6 = T.alloc_shared((1, 64), "uint32")
+            w7 = T.alloc_shared((1, 64), "uint16")
+            T.ppl_topk(values, indices, src, 7, True, 33,
+                       workspace=(w0, w1, w2, w3, w4, w5, w6, w7))
+
+    attrs = _assigned_attrs(main, target_spec="tpu -mcpu=bm1690e -tpu-programming-model=rv")
+    sizes = {"src": 33 * 4, "values": 7 * 4, "indices": 7 * 4,
+             **{f"w{i}": 64 * (2 if i == 7 else 4) for i in range(8)}}
+    for lhs, rhs in itertools.combinations(sizes, 2):
+        left, right = _addr(attrs, lhs), _addr(attrs, rhs)
+        assert left + sizes[lhs] <= right or right + sizes[rhs] <= left
+        assert left // BANK_SIZE != right // BANK_SIZE
 
 
 def test_reduce_tmp_is_separated_from_input_bank():

@@ -680,40 +680,58 @@ def ppl_gather(output, param, index, param_h):
         param_h: Positive static row count, equal to ``param.shape[0]``.
 
     Returns:
-        PrimExpr: Handle to the TPU-Kernel gather semantic operation.
+        PrimExpr: Handle to the portable gather semantic operation.
 
     Notes:
-        This is a TPU-Kernel-only system-memory operation. Output, source, and
-        index storage must be distinct.
+        Output, source, and index are contiguous rank-2 global buffers and
+        must use distinct storage. Every index must lie in ``[0, param_h)``;
+        the caller validates indices before launch. Repeated indices and
+        arbitrary index order are supported. RV uses a global DMA gather
+        and does not require a local workspace.
 
     Dtype support:
         - TPU-Kernel: E4M3, E5M2, FP16, BF16, FP32, and UINT32 payloads; UINT32 index.
-        - RV Tensor: not exposed by this backend-specific op. Use
-          ``ppl_embedding`` for a portable row lookup.
+        - RV Tensor: E4M3, E5M2, FP16, BF16, FP32, and UINT32 payloads; UINT32 index.
     """
     outptr, paramptr, indexptr = _prepare_row_gather(
         "ppl_gather", output, param, index, param_h,
         payload_dtypes=_TPU_ELEMENTWISE_FLOAT_DTYPES | {"uint32"})
-    return T.call_extern("handle", "tl.tpukernel.gather", outptr, paramptr, indexptr, param_h)
+    return T.call_extern("handle", "tl.tpu.gather", outptr, paramptr, indexptr, param_h)
 
 
-def ppl_topk(dst_data, dst_idx, src, K, descended, length):
+def ppl_topk(dst_data, dst_idx, src, K, descended, length, *, workspace=None):
     """Select the first ``K`` sorted values and their source indices.
 
     Global operands use the vector contract ``src=(length,)`` and
     ``dst_data=dst_idx=(K,)``. Local operands use row-wise rank-2 tiles:
     ``src=(rows, length)`` and ``dst_data=dst_idx=(rows, K)``. Local outputs
     may also have width ``length`` for compatibility; only the first ``K``
-    entries in each row are written. The local path stages each row through
-    L2 SRAM and completes its DMA/HAU work before returning.
-    This TPU-Kernel-only operation is supported on BM1690 and is rejected for
-    BM1690E by target-specific codegen.
+    entries in each row are written. All operands must use distinct storage.
+    RV uses a stable comparison-exchange sort: equal values retain source
+    order, including signed zeros. NaNs sort before numbers when descending
+    and after numbers when ascending. Value bits are preserved. RV pads the
+    row width to a power of two (at least 32); length must not exceed 32768
+    and the workspace must fit in local memory. For a global vector the
+    eight workspaces require 30 * padded_width bytes per NPU lane; standard
+    256 KiB local memory therefore limits this implementation to length 8192
+    before accounting for other live local buffers. Local row-wise operands
+    and additional rows sharing an NPU lane can reduce that practical limit.
+
+    RV callers must pass ``workspace=(values, keys, indices, partner, mask,
+    temp, positions, perm)``. Allocate these eight rank-2 local buffers with
+    ``T.alloc_shared``: the first seven use UINT32 and ``perm`` uses UINT16.
+    Each has shape ``(rows, max(32, next_power_of_two(length)))``, with
+    ``rows=1`` for global vectors. Their storage must be distinct from each
+    other and all public operands; their contents are overwritten internally.
+    Workspaces can be reused between consecutive calls with matching shapes.
+    Omitting ``workspace`` preserves the TPU-Kernel implementation and its
+    original L2 scratch allocation without reserving RV local workspaces.
 
     Dtype support:
         - Global vectors on BM1690: FP32, INT32, or UINT32 values; INT32 indices.
         - Local row-wise tiles on BM1690: FP32 values; INT32 or UINT32 indices.
         - TPU-Kernel on BM1690E: unavailable in the current SDK.
-        - RV Tensor: unavailable.
+        - RV Tensor on BM1690E: the same global and local dtype contracts.
     """
     operands = (("dst_data", dst_data), ("dst_idx", dst_idx), ("src", src))
     for name, buffer in operands:
@@ -730,7 +748,7 @@ def ppl_topk(dst_data, dst_idx, src, K, descended, length):
         _require_dtype("dst_idx", dst_idx, {"int32", "uint32"})
     elif str(dst_idx.dtype) != "int32":
         raise ValueError(f"ppl_topk dst_idx dtype must be int32, got {dst_idx.dtype}")
-    if not isinstance(K, int) or not isinstance(length, int) or K <= 0 or length <= 0:
+    if (type(K) is not int or type(length) is not int or K <= 0 or length <= 0):
         raise ValueError("ppl_topk K and length must be positive Python integers")
     if length < K:
         raise ValueError(f"ppl_topk requires K <= length, got K={K}, length={length}")
@@ -763,8 +781,30 @@ def ppl_topk(dst_data, dst_idx, src, K, descended, length):
     dst_data_ptr = _tpu_tensor_region(dst_data, "w")
     dst_idx_ptr = _tpu_tensor_region(dst_idx, "w")
     srcptr = _tpu_tensor_region(src, "r")
-    return T.call_extern("handle", "tl.tpukernel.topk", dst_data_ptr, dst_idx_ptr, srcptr, K,
-                         descended, length)
+    if workspace is None:
+        return T.call_extern("handle", "tl.tpukernel.topk", dst_data_ptr, dst_idx_ptr,
+                             srcptr, K, descended, length)
+    if not isinstance(workspace, (tuple, list)) or len(workspace) != 8:
+        raise ValueError("ppl_topk workspace must contain eight local buffers")
+    if length > 32768:
+        raise ValueError("RV Top-K requires a static length in [1, 32768]")
+    rows = src.shape[0] if local_rows else 1
+    width = max(32, 1 << (length - 1).bit_length())
+    for i, buffer in enumerate(workspace):
+        name = f"ppl_topk workspace[{i}]"
+        _require_local_buffer(name, buffer)
+        _require_rank(name, buffer, 2)
+        _require_dtype(name, buffer, {"uint16" if i == 7 else "uint32"})
+        try:
+            ir.assert_structural_equal(buffer.shape, [rows, width])
+        except ValueError as error:
+            raise ValueError(f"{name} must have shape ({rows}, {width})") from error
+    _require_distinct_storage(
+        "ppl_topk", dst_data=dst_data, dst_idx=dst_idx, src=src,
+        **{f"workspace[{i}]": buffer for i, buffer in enumerate(workspace)})
+    regions = [_tpu_tensor_region(buffer, "rw") for buffer in workspace]
+    return T.call_extern("handle", "tl.tpu.topk", dst_data_ptr, dst_idx_ptr, srcptr,
+                         *regions, K, descended, length)
 
 
 def ppl_rsqrt(out, inp):
@@ -917,7 +957,7 @@ def _scatter_add_impl(dst, src, indices, dim):
     # treating the second row as a linear stride.c offset.
     accumulator = T.alloc_shared((1, src.shape[1]), src.dtype)
     source_row = T.alloc_shared((1, src.shape[1]), src.dtype)
-    T.call_extern("handle", "tl.tpukernel.scatter_add", _tpu_tensor_region(dst, "rw"),
+    T.call_extern("handle", "tl.tpu.scatter_add", _tpu_tensor_region(dst, "rw"),
                   _tpu_tensor_region(src, "r"), _tpu_tensor_region(indices, "r"),
                   _tpu_tensor_region(accumulator, "rw"), _tpu_tensor_region(source_row, "rw"), dim)
 
@@ -932,7 +972,9 @@ def ppl_scatter_add(dst, src, indices, dim=0):
     supported. Duplicate indices accumulate in source-row order onto the
     existing destination values. All three buffers must use distinct storage.
 
-    This TPU-Kernel-only composite allocates two local row tiles internally.
+    TPU-Kernel uses two internal local row tiles. RV Tensor emits a floating
+    DMA scatter with accumulation directly between global buffers; RV row
+    widths must be at least two to satisfy the instruction's C-axis contract.
     """
     for name, buffer in (("dst", dst), ("src", src), ("indices", indices)):
         _require_global_buffer(name, buffer)

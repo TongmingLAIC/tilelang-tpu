@@ -548,9 +548,8 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     EmitRVScatter(dst_operand.descriptor, src_operand.descriptor,
                   idx_operand.descriptor, dst_operand.dtype,
                   static_cast<int64_t>(src_operand.shape4[1]));
-  } else if (op_name == "tl.tpukernel.scatter_add") {
-    ICHECK_EQ(target_programming_model_, "tpukernel")
-        << op_name << " requires target tpu-programming-model=tpukernel";
+  } else if (op_name == "tl.tpu.scatter_add" ||
+             op_name == "tl.tpukernel.scatter_add") {
     ICHECK_EQ(op->args.size(), 7U)
         << op_name << " expects dst, src, indices, two local row tiles, and dim";
     constexpr std::array<int, 5> kAccessMasks = {3, 1, 1, 3, 3};
@@ -593,6 +592,15 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
           << op_name << " row tiles must match the payload dtype";
       ICHECK(operands[i].shape4 == std::vector<int>({1, 1, 1, width}))
           << op_name << " local row tiles must have shape (1, width)";
+    }
+    if (target_programming_model_ == "rv") {
+      ICHECK_GE(width, 2)
+          << op_name << " RV Tensor requires row width >= 2 so source and "
+                        "index do not both have C=1";
+      EmitRVScatterAdd(operands[0].descriptor, operands[1].descriptor,
+                       operands[2].descriptor, dtype,
+                       operands[0].shape4[1], rows, width);
+      return true;
     }
     constexpr int64_t kLocalMemBytes =
         tl::tpuv7::kBankNum * tl::tpuv7::kBankSize;
@@ -1203,7 +1211,7 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
                  << ".addr, &" << src0 << ".shape, "
                  << TPUKernelDTypeName(dst_dtype) << ");\n";
 
-  } else if (op_name == "tl.tpukernel.gather" ||
+  } else if (op_name == "tl.tpukernel.gather" || op_name == "tl.tpu.gather" ||
              op_name == "tl.tpu.embedding") {
     ICHECK_EQ(op->args.size(), 5U)
         << op_name << " expects output, param, index, and param_h";
@@ -1245,14 +1253,14 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
         << op_name << " output and param dtypes must match";
     ICHECK_EQ(operands[2].dtype, DataType::UInt(32))
         << op_name << " index dtype must be uint32";
-    const bool uint32_gather = op_name == "tl.tpukernel.gather" &&
-                               target_programming_model_ == "tpukernel" &&
+    const bool is_gather = op_name != "tl.tpu.embedding";
+    const bool uint32_gather = is_gather &&
                                dtype_ == DataType::UInt(32);
     ICHECK(uint32_gather || dtype_ == DataType::Float(16) || dtype_ == DataType::Float(32) ||
            dtype_ == DataType::BFloat(16) || dtype_.is_e4m3_float8() ||
            dtype_.is_e5m2_float8())
         << op_name
-        << (op_name == "tl.tpukernel.gather"
+        << (is_gather
                 ? " supports FP8, FP16, BF16, FP32, or UINT32 payloads, got "
                 : " supports FP8, FP16, BF16, or FP32 payloads, got ")
         << dtype_;
@@ -1275,6 +1283,11 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     const std::string &param = tensors[1];
     const std::string &index = tensors[2];
     if (target_programming_model_ == "rv") {
+      if (is_gather) {
+        EmitRVGather(dst, param, index, dtype_, param_h, dst_shape[1],
+                      dst_shape[3]);
+        return true;
+      }
       // Row-major global tables: reinterpret logical C rows as DMA H rows.
       stream << "{\n";
       for (size_t i = 0; i < tensors.size(); ++i) {
@@ -1307,14 +1320,16 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
                  << "NULL, NULL, NULL, " << dtype << ");\n";
     this->PrintIndent();
     this->stream << "}\n";
-  } else if (op_name == "tl.tpukernel.topk") {
-    ICHECK_NE(target_chip_, "bm1690e")
+  } else if (op_name == "tl.tpukernel.topk" || op_name == "tl.tpu.topk") {
+    ICHECK(target_programming_model_ == "rv" || target_chip_ != "bm1690e")
         << op_name
         << " is unavailable on BM1690E: the PPL 1.7 "
            "tpub_7_1_e runtime rejects tpu_hau_sort_natural_index";
-    ICHECK_EQ(op->args.size(), 7U)
+    const bool has_workspace = op_name == "tl.tpu.topk";
+    ICHECK_EQ(op->args.size(), has_workspace ? 15U : 7U)
         << op_name
-        << " expects dst_data, dst_idx, src, K, descended, and length";
+        << " expects dst_data, dst_idx, src, eight workspace buffers for "
+           "the portable ABI, then K, descended, and length";
     std::array<SemanticTensorOperand, 3> operands{};
     constexpr std::array<int, 3> kAccessMasks = {2, 2, 1};
     std::array<std::string, 3> tensors{};
@@ -1335,9 +1350,10 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
            operands[0].data_var != operands[2].data_var &&
            operands[1].data_var != operands[2].data_var)
         << op_name << " requires distinct dst_data, dst_idx, and src storage";
-    const auto *k_imm = op->args[4].as<IntImmNode>();
-    const auto *descended_imm = op->args[5].as<IntImmNode>();
-    const auto *length_imm = op->args[6].as<IntImmNode>();
+    const size_t attribute_start = has_workspace ? 12 : 4;
+    const auto *k_imm = op->args[attribute_start].as<IntImmNode>();
+    const auto *descended_imm = op->args[attribute_start + 1].as<IntImmNode>();
+    const auto *length_imm = op->args[attribute_start + 2].as<IntImmNode>();
     ICHECK(k_imm && length_imm && k_imm->value > 0 && length_imm->value > 0 &&
            k_imm->value <= length_imm->value)
         << op_name << " requires compile-time integers 0 < K <= length";
@@ -1372,6 +1388,33 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     const std::string &dst_data = tensors[0];
     const std::string &dst_idx = tensors[1];
     const std::string &src = tensors[2];
+    auto emit_rv_topk = [&]() {
+      ICHECK(has_workspace) << "RV Top-K requires explicit local workspace";
+      ICHECK_LE(length_val, 32768) << "RV Top-K length must not exceed 32768";
+      int width = 32;
+      while (width < length_val) {
+        width *= 2;
+      }
+      const int rows = local_rows ? src_shape[1] : 1;
+      std::unordered_set<const VarNode *> storage;
+      for (const auto &operand : operands) {
+        storage.insert(operand.data_var);
+      }
+      std::vector<std::string> workspace;
+      for (size_t i = 0; i < 8; ++i) {
+        auto work = ParseWholeBufferRegion(op->args[4 + i],
+                                          "RV Top-K workspace", 3);
+        ICHECK(work.is_local && work.rank == 2 &&
+               work.shape4 == std::vector<int>({1, rows, 1, width}))
+            << "RV Top-K workspace has an invalid shape or scope";
+        ICHECK_EQ(work.dtype, DataType::UInt(i == 7 ? 16 : 32));
+        ICHECK(storage.insert(work.data_var).second)
+            << "RV Top-K workspaces and operands must use distinct storage";
+        workspace.push_back(work.descriptor);
+      }
+      EmitRVTopK(dst_data, dst_idx, src, dtype_, local_rows, rows,
+                 length_val, K_val, descended_val, workspace);
+    };
     if (local_rows) {
       ICHECK_EQ(dtype_, DataType::Float(32))
           << op_name << " local row-wise selection requires FP32 values";
@@ -1383,6 +1426,10 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
           << op_name << " local value and index outputs must have matching shapes";
       ICHECK(dst_data_shape[3] == K_val || dst_data_shape[3] == length_val)
           << op_name << " local output width must equal K or length";
+      if (target_programming_model_ == "rv") {
+        emit_rv_topk();
+        return true;
+      }
 
       const std::string row = name_supply_->FreshName("topk_row");
       const std::string l2_input = name_supply_->FreshName("topk_l2_input");
@@ -1470,6 +1517,10 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     // unused, unspecified length-K tail.
     require_vector_shape(dst_data_shape, K_val, "dst_data");
     require_vector_shape(dst_idx_shape, K_val, "dst_idx");
+    if (target_programming_model_ == "rv") {
+      emit_rv_topk();
+      return true;
+    }
 
     // HAU does not inherit DMA completion merely from C call order. The
     // source may have been produced by an earlier global copy in this kernel.

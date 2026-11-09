@@ -18,6 +18,9 @@ _PORTABLE_EXTERNS = {
     "tl.tpu.reduce_max",
     "tl.tpu.exp",
     "tl.tpu.dq2",
+    "tl.tpu.gather",
+    "tl.tpu.scatter_add",
+    "tl.tpu.topk",
     "tl.tpu.scatter",
     "tl.tpu.add",
     "tl.tpu.copy",
@@ -35,12 +38,17 @@ _TPUKERNEL_EXTERNS = {
     "tl.tpukernel.parallel_start",
     "tl.tpukernel.parallel_end",
 }
+# TPU-Kernel accepts old serialized IR; the frontend emits their portable ABI.
+_LEGACY_TPUKERNEL_EXTERNS = {"tl.tpukernel.gather", "tl.tpukernel.scatter_add"}
 _TPUKERNEL_COMMAND_EXTERNS = {
     "tl.tpukernel.parallel_start",
     "tl.tpukernel.parallel_end",
 }
 _PORTABLE_IMPLEMENTED_IN_TPUKERNEL = {
     "tl.tpu.dq2",
+    "tl.tpu.gather",
+    "tl.tpu.scatter_add",
+    "tl.tpu.topk",
     "tl.tpu.scatter",
     "tl.tpu.embedding",
     "tl.tpu.add_scalar",
@@ -71,7 +79,8 @@ def test_semantic_extern_registry_is_isomorphic_across_compiler_layers():
     """An extern is valid only when every source-level compiler boundary owns it."""
     expected = _PORTABLE_EXTERNS | _TPUKERNEL_EXTERNS
 
-    assert _semantic_externs("tilelang/language/customize.py") == expected
+    assert _semantic_externs("tilelang/language/customize.py") == (
+        expected - _LEGACY_TPUKERNEL_EXTERNS)
     assert _semantic_externs("tilelang/engine/lower.py") == expected
     assert _semantic_externs("src/transform/address_assign.cc") == expected
     assert _semantic_externs("src/target/codegen_tpu.cc") == (
@@ -87,6 +96,10 @@ def test_every_semantic_extern_has_exact_region_operand_positions():
 
     assert set(positions) == expected
     assert positions["tl.tpu.dq2"] == (1, 2, 3, 5)
+    assert positions["tl.tpu.gather"] == positions["tl.tpukernel.gather"] == (1, 2, 3)
+    assert positions["tl.tpu.scatter_add"] == positions["tl.tpukernel.scatter_add"] == (1, 2, 3, 4, 5)
+    assert positions["tl.tpu.topk"] == tuple(range(1, 12))
+    assert positions["tl.tpukernel.topk"] == (1, 2, 3)
     assert all(
         tuple(indices) == tuple(range(1, len(indices) + 1))
         for op, indices in positions.items() if op != "tl.tpu.dq2")

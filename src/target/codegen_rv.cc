@@ -72,6 +72,148 @@ void CheckRVShape(const std::vector<int> &shape, const char *operation,
 
 } // namespace
 
+void CodeGenTileLangTPU::EmitRVTopK(
+    const std::string &dst, const std::string &indices, const std::string &src,
+    DataType dtype, bool is_local, int rows, int length, int k, bool descending,
+    const std::vector<std::string> &workspace) {
+  int width = 32;
+  while (width < length) {
+    width *= 2;
+  }
+  auto line = [&](const std::string &text) {
+    PrintIndent();
+    stream << text << "\n";
+  };
+  auto instruction = [&](const std::string &text) {
+    line(text);
+    line("rvt_sync_i(0xdeadbeef, 0);");
+  };
+  auto constant = [&](int reg, const std::string &value) {
+    line("rv_topk_constant = " + value + ";");
+    line("rvt_cr(" + std::to_string(reg) +
+         ", PRECISION(DT_UINT32), SIGN(DT_UINT32), &rv_topk_constant);");
+  };
+  // DMA views retain their parent stride when selecting a prefix or column.
+  auto view = [&](const std::string &tensor, const std::string &name,
+                  const std::string &offset, int columns) {
+    line("__tilelang_tpu_tensor_info " + name + " = " + tensor + ";");
+    line(name + ".addr += " + offset + ";");
+    line(name + ".shape.w = " + std::to_string(columns) + ";");
+  };
+  auto io_descriptor = [&](const std::string &tensor, int reg) {
+    if (is_local) {
+      EmitRVDescriptor(tensor, reg, false, "DT_UINT32", false);
+    } else {
+      // Whole global vectors may carry an implicit (zero-initialized) stride.
+      line("rvt_gr(" + std::to_string(reg) +
+           ", PRECISION(DT_UINT32), SIGN(DT_UINT32), " + tensor +
+           ".addr, CONTINUOUS_LAYOUT, (array4_t){1, 1, 1, " + tensor +
+           ".shape.w}, (int *)NULL);");
+    }
+  };
+
+  line("{");
+  line("uint64_t rv_topk_constant;");
+  constant(1, "0");
+  constant(2, "1");
+  constant(3, "0x80000000ULL");
+  constant(4, "0x7fffffffULL");
+  constant(5, "0x7f800000ULL");
+  constant(6, "0xffffffffULL");
+  line("rvt_cfg_satu(0, false);");
+  line("rvt_cfg_round_mode(0);");
+  // TR8..14: value bits, ordering keys, original indices, partner, mask,
+  // temporary, and immutable positions. TR15 holds the UINT16 permutation.
+  for (int i = 0; i < 7; ++i) {
+    EmitRVDescriptor(workspace[i], 8 + i, false, "DT_UINT32", true);
+  }
+  line("rvt_tr(15, PRECISION(DT_UINT16), SIGN(DT_UINT16), " +
+       workspace[7] + ".addr, CONTINUOUS_LAYOUT, (array4_t){1, " +
+       std::to_string(rows) + ", 1, " + std::to_string(width) +
+       "}, (int *)NULL);");
+
+  // Construct the index ramp with RV constant broadcasts and column DMA.
+  // No tensor value or sorting decision is read by the host CPU.
+  view(workspace[5], "rv_topk_column", "0", 1);
+  // Keep the parent channel stride for rows that wrap to the same NPU lane.
+  // Recomputing an aligned layout from W=1 misaddresses those rows on hardware.
+  EmitRVDescriptor("rv_topk_column", 16, false, "DT_UINT32", false);
+  line("for (int rv_topk_i = 0; rv_topk_i < " + std::to_string(width) +
+       "; ++rv_topk_i) {");
+  constant(7, "rv_topk_i");
+  instruction("rvt_cp(16, 7);");
+  view(workspace[6], "rv_topk_position", "rv_topk_i * 4", 1);
+  EmitRVDescriptor("rv_topk_position", 17, false, "DT_UINT32", false);
+  instruction("rvt_dma_cp(17, 16);");
+  line("}");
+  instruction("rvt_cp(10, 14);");
+  instruction("rvt_cp(8, 1);");
+  view(workspace[0], "rv_topk_input", "0", length);
+  EmitRVDescriptor("rv_topk_input", 17, false, "DT_UINT32", false);
+  io_descriptor(src, is_local ? 16 : 32);
+  instruction(is_local ? "rvt_dma_cp(17, 16);" : "rvt_dma_ld(17, 32);");
+
+  // Sort unsigned integer keys while moving the original 32-bit payload.
+  // This preserves NaN payloads, subnormals, signed zeros, and integer bits.
+  if (dtype == DataType::Float(32)) {
+    instruction("rvt_and(13, 8, 4);");
+    instruction("rvt_xor(11, 8, 3);");
+    instruction("rvt_not(9, 8);");
+    instruction("rvt_cmpgt(9, 8, 4, 9, 11);");
+    instruction("rvt_cmpeq(9, 13, 1, 3, 9);");
+    instruction("rvt_cmpgt(9, 13, 5, 6, 9);");
+  } else if (dtype == DataType::Int(32)) {
+    instruction("rvt_xor(9, 8, 3);");
+  } else {
+    instruction("rvt_cp(9, 8);");
+  }
+  constant(7, std::to_string(length));
+  instruction("rvt_cmplt(9, 14, 7, 9, " +
+              std::string(descending ? "1" : "6") + ");");
+
+  // Bitonic compare-exchange network. Each compare uses (key, original
+  // index), so ties are stable. Padding sorts after all real elements.
+  line("for (int rv_topk_span = 2; rv_topk_span <= " +
+       std::to_string(width) + "; rv_topk_span *= 2) {");
+  line("for (int rv_topk_step = rv_topk_span / 2; rv_topk_step > 0; "
+       "rv_topk_step /= 2) {");
+  constant(7, "rv_topk_step");
+  instruction("rvt_xor(13, 14, 7);");
+  instruction("rvt_cvt_i2i(15, 13);");
+  instruction("rvt_gather(11, 10, 15, 1, 1, 1);");
+  instruction("rvt_cmplt(12, 10, 11, 2, 1);");
+  instruction("rvt_gather(11, 9, 15, 1, 1, 1);");
+  instruction("rvt_cmpeq(12, 9, 11, 12, 1);");
+  instruction(std::string(descending ? "rvt_cmpgt" : "rvt_cmplt") +
+              "(12, 9, 11, 2, 12);");
+  instruction("rvt_and(11, 14, 7);");
+  instruction("rvt_cmpeq(11, 11, 1, 2, 1);");
+  constant(7, "rv_topk_span");
+  instruction("rvt_and(13, 14, 7);");
+  instruction("rvt_cmpeq(13, 13, 1, 2, 1);");
+  instruction("rvt_xor(13, 13, 11);");
+  instruction("rvt_xor(12, 12, 13);");
+  for (int reg = 8; reg <= 10; ++reg) {
+    instruction("rvt_gather(11, " + std::to_string(reg) + ", 15, 1, 1, 1);");
+    instruction("rvt_cmpeq(13, 12, 2, " + std::to_string(reg) + ", 11);");
+    instruction("rvt_cp(" + std::to_string(reg) + ", 13);");
+  }
+  line("}");
+  line("}");
+
+  const std::vector<std::string> outputs = {dst, indices};
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    const std::string input_view = "rv_topk_result" + std::to_string(i);
+    const std::string output_view = "rv_topk_output" + std::to_string(i);
+    view(workspace[i == 0 ? 0 : 2], input_view, "0", k);
+    view(outputs[i], output_view, "0", k);
+    EmitRVDescriptor(input_view, 16, false, "DT_UINT32", false);
+    io_descriptor(output_view, is_local ? 17 : 32);
+    instruction(is_local ? "rvt_dma_cp(17, 16);" : "rvt_dma_st(32, 16);");
+  }
+  line("}");
+}
+
 void CodeGenTileLangTPU::EmitRVDescriptor(const std::string &tensor,
                                           int register_id, bool is_global,
                                           const std::string &dtype,
@@ -608,6 +750,84 @@ void CodeGenTileLangTPU::EmitRVScatter(const std::string &dst,
   stream << "}\n";
   PrintIndent();
   stream << "rvt_dma_fhscatter(34, 9, 8, 0, 0);\n";
+}
+
+void CodeGenTileLangTPU::EmitRVGather(
+    const std::string &dst, const std::string &param, const std::string &index,
+    DataType dtype, int parameter_rows, int count, int width) {
+  const bool is_integer = dtype == DataType::UInt(32);
+  const auto type = is_integer ? "DT_UINT32" : RVDTypeName(dtype);
+  const auto format = is_integer ? "SIGN" : "FP8TYPE";
+  // Source rows are DMA H rows; index/output rows are independent C channels.
+  // hgather requires source.C and index.C not to both be one. For a single
+  // lookup, zero C strides broadcast its index and destination over two
+  // channels. Both stores write the same row bits to exactly the same range.
+  const int channels = count == 1 ? 2 : count;
+  const int output_c_stride = count == 1 ? 0 : width;
+  const int index_c_stride = count == 1 ? 0 : 1;
+  PrintIndent();
+  stream << "{\n";
+  PrintIndent();
+  stream << "rvt_gr(32, PRECISION(" << type << "), " << format << "(" << type
+         << "), " << dst << ".addr, FREE_LAYOUT, (array4_t){1, " << channels
+         << ", 1, " << width << "}, (int[4]){"
+         << static_cast<int64_t>(count) * width << ", " << output_c_stride
+         << ", " << width << ", 1});\n";
+  PrintIndent();
+  stream << "rvt_gr(33, PRECISION(" << type << "), " << format << "(" << type
+         << "), " << param << ".addr, CONTINUOUS_LAYOUT, (array4_t){1, 1, "
+         << parameter_rows << ", " << width << "}, (int *)NULL);\n";
+  PrintIndent();
+  stream << "rvt_gr(34, PRECISION(DT_UINT32), SIGN(DT_UINT32), " << index
+         << ".addr, FREE_LAYOUT, (array4_t){1, " << channels
+         << ", 1, 1}, (int[4]){" << count << ", " << index_c_stride
+         << ", 1, 1});\n";
+  PrintIndent();
+  stream << "uint64_t rv_gather_zero = 0;\n";
+  PrintIndent();
+  stream << "rvt_cfg_dmaidx(0, &rv_gather_zero);\n";
+  PrintIndent();
+  stream << "rvt_dma_hgather(32, 33, 34, 0);\n";
+  PrintIndent();
+  stream << "}\n";
+}
+
+void CodeGenTileLangTPU::EmitRVScatterAdd(
+    const std::string &dst, const std::string &src, const std::string &index,
+    DataType dtype, int destination_rows, int source_rows, int width) {
+  // Put rows on H and partition columns across C. C>1 lets the UINT32 index
+  // table broadcast across channels without violating fhscatter's contract.
+  // Even widths use two contiguous column groups; odd widths use scalar W.
+  const int channels = width % 2 == 0 ? 2 : width;
+  const int group_width = width / channels;
+  const auto type = RVDTypeName(dtype);
+  PrintIndent();
+  stream << "{\n";
+  PrintIndent();
+  stream << "rvt_gr(32, PRECISION(" << type << "), FP8TYPE(" << type << "), "
+         << dst << ".addr, FREE_LAYOUT, (array4_t){1, " << channels << ", "
+         << destination_rows << ", " << group_width << "}, (int[4]){"
+         << static_cast<int64_t>(destination_rows) * width << ", "
+         << group_width << ", " << width << ", 1});\n";
+  PrintIndent();
+  stream << "rvt_gr(33, PRECISION(" << type << "), FP8TYPE(" << type << "), "
+         << src << ".addr, FREE_LAYOUT, (array4_t){1, " << channels << ", "
+         << source_rows << ", " << group_width << "}, (int[4]){"
+         << static_cast<int64_t>(source_rows) * width << ", " << group_width
+         << ", " << width << ", 1});\n";
+  PrintIndent();
+  stream << "rvt_gr(34, PRECISION(DT_UINT32), SIGN(DT_UINT32), " << index
+         << ".addr, FREE_LAYOUT, (array4_t){1, 1, " << source_rows
+         << ", 1}, (int[4]){" << source_rows << ", " << source_rows
+         << ", 1, 1});\n";
+  PrintIndent();
+  stream << "uint64_t rv_scatter_add_zero = 0;\n";
+  PrintIndent();
+  stream << "rvt_cfg_dmaidx(0, &rv_scatter_add_zero);\n";
+  PrintIndent();
+  stream << "rvt_dma_fhscatter(32, 33, 34, 0, 1);\n";
+  PrintIndent();
+  stream << "}\n";
 }
 
 } // namespace codegen

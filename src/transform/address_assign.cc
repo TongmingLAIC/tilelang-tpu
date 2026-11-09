@@ -1103,7 +1103,8 @@ private:
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);
-    } else if (op_name == "tl.tpukernel.scatter_add") {
+    } else if (op_name == "tl.tpukernel.scatter_add" ||
+               op_name == "tl.tpu.scatter_add") {
       // This opaque composite repeatedly loads, adds, and stores rows. Its
       // two internal local tiles are both read and written by that sequence.
       for (size_t i = 1; i <= 5; ++i) {
@@ -1125,10 +1126,18 @@ private:
         mark_arg(i, BufferAccessKind::kConservative);
       }
     } else if (op_name == "tl.tpukernel.gather" ||
-               op_name == "tl.tpu.embedding") {
+               op_name == "tl.tpu.gather" || op_name == "tl.tpu.embedding") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);
+    } else if (op_name == "tl.tpu.topk") {
+      // The RV sorting network reads and rewrites all workspace tiles.
+      // Treat the opaque sequence as one conflict clique, including local
+      // input/output operands, so placement cannot alias live sorting state.
+      ICHECK_EQ(op->args.size(), 15U);
+      for (size_t i = 1; i <= 11; ++i) {
+        mark_arg(i, BufferAccessKind::kConservative);
+      }
     } else if (op_name == "tl.tpukernel.topk") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kWrite);
