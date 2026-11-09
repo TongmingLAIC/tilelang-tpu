@@ -711,7 +711,11 @@ def ppl_topk(dst_data, dst_idx, src, K, descended, length, *, workspace=None):
     order, including signed zeros. NaNs sort before numbers when descending
     and after numbers when ascending. Value bits are preserved. RV pads the
     row width to a power of two (at least 32); length must not exceed 32768
-    and the workspace must fit in local memory.
+    and the workspace must fit in local memory. For a global vector the
+    eight workspaces require 30 * padded_width bytes per NPU lane; standard
+    256 KiB local memory therefore limits this implementation to length 8192
+    before accounting for other live local buffers. Local row-wise operands
+    and additional rows sharing an NPU lane can reduce that practical limit.
 
     RV callers must pass ``workspace=(values, keys, indices, partner, mask,
     temp, positions, perm)``. Allocate these eight rank-2 local buffers with
