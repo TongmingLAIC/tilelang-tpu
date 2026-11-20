@@ -164,6 +164,9 @@ int init() {{
   if (tilelang_tpu_runtime_ready) {{
     return 0;
   }}
+  if (tpu_module != nullptr || stream != nullptr) {{
+    return -19;
+  }}
 #ifdef USING_CMODEL
 #ifndef TILELANG_TPU_CMODEL_CORE_NUM
 #error "CModel main.so must embed the target core count"
@@ -216,16 +219,28 @@ int init() {{
   return 0;
 }}
 
-void post() {{
+static int post() {{
+  tilelang_tpu_runtime_ready = false;
   if (tpu_module != nullptr) {{
-    tpuRtKernelUnloadModule(tpu_module, stream);
+    if (tpuRtKernelUnloadModule(tpu_module, stream) != tpuRtSuccess) {{
+      return -17;
+    }}
     tpu_module = nullptr;
   }}
   if (stream != nullptr) {{
-    tpuRtStreamDestroy(stream);
+    if (tpuRtStreamDestroy(stream) != tpuRtSuccess) {{
+      return -18;
+    }}
     stream = nullptr;
   }}
+  return 0;
 }}
+
+#ifdef USING_CMODEL
+extern "C" int tilelang_tpu_release_cmodel() {{
+  return post();
+}}
+#endif
 
 extern "C" int tilelang_tpu_run(void** args) {{
   if (args == nullptr) {{
@@ -373,8 +388,10 @@ extern "C" int tilelang_tpu_run(void** args) {{
   // used to cost.  Keep the module resident by default and let a caller opt
   // back into per-call teardown for leak checking.
   if (tilelang_tpu_env_is_one("TILELANG_TPU_POST_EACH_CALL")) {{
-    post();
-    tilelang_tpu_runtime_ready = false;
+    const int cleanup_status = post();
+    if (status == 0) {{
+      status = cleanup_status;
+    }}
   }}
 #ifdef TILELANG_TPU_PCIE_PROFILING
   if (profile_handle != nullptr) {{

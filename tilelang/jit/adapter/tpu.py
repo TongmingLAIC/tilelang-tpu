@@ -33,6 +33,8 @@ class _TPURuntimeIdentity:
 
 
 _TPU_RUNTIME_IDENTITY: Optional[_TPURuntimeIdentity] = None
+_CMODEL_ACTIVE_LIBRARY: Optional[ctypes.CDLL] = None
+_CMODEL_RELEASE_FAILURE: Optional[int] = None
 
 
 def reserve_tpu_runtime_identity(tpu_target, tpu_runtime, device_id: int,
@@ -91,6 +93,28 @@ def reject_unverified_tpu_database_artifact(target) -> None:
         raise RuntimeError("Loading TPU artifacts from cache/database is disabled until a "
                            "chip/device/runtime manifest and bundled private libkernel.so are "
                            "implemented. Recompile the TPU kernel in this process instead.")
+
+
+def _select_cmodel_library(lib: ctypes.CDLL) -> None:
+    """Switch the one loaded CModel JIT module under the TPU execution lock."""
+    global _CMODEL_ACTIVE_LIBRARY, _CMODEL_RELEASE_FAILURE
+    if _CMODEL_RELEASE_FAILURE is not None:
+        raise RuntimeError(
+            f"CModel module release failed with status {_CMODEL_RELEASE_FAILURE}; "
+            "use a fresh isolated CModel process.")
+    if lib is _CMODEL_ACTIVE_LIBRARY:
+        return
+    # Retain the CDLL and its workspace while its device module is loaded.
+    # CModel can silently dispatch the earlier module when two are loaded.
+    if _CMODEL_ACTIVE_LIBRARY is not None:
+        release = _CMODEL_ACTIVE_LIBRARY.tilelang_tpu_release_cmodel
+        release.argtypes = []
+        release.restype = ctypes.c_int
+        status = release()
+        if status != 0:
+            _CMODEL_RELEASE_FAILURE = status
+            raise RuntimeError(f"CModel module release failed with status {status}.")
+    _CMODEL_ACTIVE_LIBRARY = lib
 
 
 def _param_dtype(param):
@@ -235,6 +259,7 @@ def make_tpu_forward(lib: ctypes.CDLL, params: Sequence, result_idx: List[int],
             if owner is not None and owner.tpu_runtime.runtime_mode == "cmodel":
                 from tilelang.jit.tpu_cmodel import require_private_cmodel
                 require_private_cmodel()
+                _select_cmodel_library(lib)
             status = run(argv)
         if status != 0:
             raise RuntimeError(f"TileLang TPU execution failed with status {status}.")
