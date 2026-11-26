@@ -1,7 +1,7 @@
 # tilelang + tpu Guides
 
 ## Installation
-After clone this repo, we need to git apply some tvm patch like the following:
+After cloning this repo, we need to git apply a tvm patch like the following:
 
 ```bash
 cp patches/tvm.patch 3rdparty/tvm/tvm.patch
