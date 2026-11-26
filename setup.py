@@ -16,7 +16,7 @@ from io import BytesIO
 import os
 import sys
 import urllib.request
-from distutils.version import LooseVersion
+from packaging.version import Version
 import platform
 import multiprocessing
 from setuptools.command.build_ext import build_ext
@@ -81,7 +81,7 @@ def get_nvcc_cuda_version():
     nvcc_output = subprocess.check_output(["nvcc", "-V"], universal_newlines=True)
     output = nvcc_output.split()
     release_idx = output.index("release") + 1
-    nvcc_cuda_version = LooseVersion(output[release_idx].split(",")[0])
+    nvcc_cuda_version = Version(output[release_idx].split(",")[0])
     return nvcc_cuda_version
 
 
