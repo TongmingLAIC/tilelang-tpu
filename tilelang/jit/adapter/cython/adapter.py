@@ -293,11 +293,15 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.lib_generator = LibraryGenerator(adapter.target)
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
 
-        adapter.lib.get_last_error.restype = ctypes.c_char_p
-        result = adapter.lib.init()
-        if result != 0:
-            error_msg = adapter.lib.get_last_error().decode('utf-8')
-            raise RuntimeError(f"Initialization failed: {error_msg}")
+        if is_tpu_target(adapter.target):
+            adapter.lib.tilelang_tpu_run.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+            adapter.lib.tilelang_tpu_run.restype = ctypes.c_int
+        else:
+            adapter.lib.get_last_error.restype = ctypes.c_char_p
+            result = adapter.lib.init()
+            if result != 0:
+                error_msg = adapter.lib.get_last_error().decode('utf-8')
+                raise RuntimeError(f"Initialization failed: {error_msg}")
 
         adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params,
                                                      adapter.lib)
