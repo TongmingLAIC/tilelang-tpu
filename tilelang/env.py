@@ -50,10 +50,10 @@ TILELANG_CACHE_DIR: str = os.environ.get("TILELANG_CACHE_DIR",
 TILELANG_CLEAR_CACHE = os.environ.get("TILELANG_CLEAR_CACHE", "0")
 
 # SETUP ENVIRONMENT VARIABLES
-CUTLASS_NOT_FOUND_MESSAGE = ("CUTLASS is not installed or found in the expected path")
-", which may lead to compilation bugs when utilize tilelang backend."
-TL_TEMPLATE_NOT_FOUND_MESSAGE = ("TileLang is not installed or found in the expected path")
-", which may lead to compilation bugs when utilize tilelang backend."
+CUTLASS_NOT_FOUND_MESSAGE = ("CUTLASS is not installed or found in the expected path"
+    ", which may lead to compilation bugs when utilizing tilelang backend.")
+TL_TEMPLATE_NOT_FOUND_MESSAGE = ("TileLang is not installed or found in the expected path"
+    ", which may lead to compilation bugs when utilizing tilelang backend.")
 TVM_LIBRARY_NOT_FOUND_MESSAGE = ("TVM is not installed or found in the expected path")
 
 SKIP_LOADING_TILELANG_SO = os.environ.get("SKIP_LOADING_TILELANG_SO", "0")
