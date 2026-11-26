@@ -97,7 +97,6 @@ def copy(
     """
     if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
         ir.assert_structural_equal(src.shape, dst.shape)
-    print(type(src))
 
     def get_extent(data):
         if isinstance(data, tir.Buffer):
